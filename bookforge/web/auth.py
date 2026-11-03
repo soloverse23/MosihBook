@@ -170,7 +170,10 @@ def install(app: FastAPI) -> None:
         who = token_user(request.cookies.get(COOKIE)) if enabled() else None
         return {"enabled": enabled(), "mode": mode(), "signed_in": bool(who), "user": who or user(),
                 "signup_open": mode() == "accounts" and bool(invite_code()),
-                "persistent": kv.persistent()}
+                "persistent": kv.persistent(),
+                # troubleshooting: what this deploy can see (names only, never values)
+                "invite_code_set": bool(invite_code()), "database": kv.backend(),
+                "database_env": kv.seen_env() if mode() == "accounts" else []}
 
     @app.post("/api/signup")
     def signup(request: Request, body: dict = Body(...)):

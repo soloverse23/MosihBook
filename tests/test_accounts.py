@@ -219,3 +219,46 @@ def test_claude_api_request(monkeypatch):
     assert b["fallbacks"] == "default" and b["output_config"] == {"effort": "high"}
     kinds = [c["type"] for c in b["messages"][0]["content"]]
     assert kinds == ["text", "image", "text"] and "JSON schema" in b["messages"][0]["content"][-1]["text"]
+
+
+def test_database_env_variants(tmp_path, monkeypatch):
+    from bookforge import kv
+    for k in list(__import__("os").environ):
+        if any(w in k for w in ("KV_", "REDIS", "UPSTASH")):
+            monkeypatch.delenv(k)
+    assert kv.backend() == "file"
+    # Vercel's Upstash integration with a custom prefix; the read-only token is never used for writes
+    monkeypatch.setenv("STORAGE_KV_REST_API_URL", "https://x.upstash.io/")
+    monkeypatch.setenv("STORAGE_KV_REST_API_READ_ONLY_TOKEN", "ro")
+    assert kv.backend() == "file"
+    monkeypatch.setenv("STORAGE_KV_REST_API_TOKEN", "rw")
+    assert kv._upstash() == ("https://x.upstash.io", "rw") and kv.backend() == "upstash"
+    assert kv.seen_env() == ["STORAGE_KV_REST_API_READ_ONLY_TOKEN", "STORAGE_KV_REST_API_TOKEN", "STORAGE_KV_REST_API_URL"]
+
+
+def test_redis_url_store(monkeypatch):
+    """Vercel's Redis Cloud integration gives only REDIS_URL."""
+    from bookforge import kv
+    for k in list(__import__("os").environ):
+        if any(w in k for w in ("KV_", "REDIS", "UPSTASH")):
+            monkeypatch.delenv(k)
+    monkeypatch.setenv("REDIS_URL", "rediss://default:pw@example.redis.cloud:6379")
+
+    class FakeRedis(dict):
+        def get(self, k):
+            return dict.get(self, k)
+
+        def set(self, k, v, nx=False):
+            if nx and k in self:
+                return None
+            self[k] = v
+            return True
+
+        def delete(self, k):
+            self.pop(k, None)
+    monkeypatch.setattr(kv, "_client", FakeRedis())
+    assert kv.backend() == "redis" and kv.persistent()
+    assert kv.set("user:a", {"x": 1}) and not kv.set("user:a", {"x": 2}, only_if_new=True)
+    assert kv.get("user:a") == {"x": 1}
+    kv.delete("user:a")
+    assert kv.get("user:a") is None

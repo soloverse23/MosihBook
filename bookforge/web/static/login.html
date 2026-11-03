@@ -30,7 +30,9 @@
     <svg width="28" height="28" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M9 9.5c2.6-.9 5-.6 7 .9v12.6c-2-1.5-4.4-1.8-7-.9zM23 9.5c-2.6-.9-5-.6-7 .9v12.6c2-1.5 4.4-1.8 7-.9z" fill="#fff"/></svg>
     MosiBooks
   </div>
-  <div class="warn" id="temp" hidden>Accounts on this server aren't stored permanently yet (no database connected). Ask the owner to connect Upstash Redis.</div>
+  <div class="warn" id="temp" hidden>Accounts on this server aren't stored permanently yet: no database is connected. The owner connects Redis in Vercel → Storage, then redeploys.</div>
+  <div class="warn" id="closed" hidden>Creating accounts is turned off: this server has no invite code
+    (MOSIBOOKS_INVITE_CODE). The owner adds it in Vercel → Settings → Environment Variables, then redeploys.</div>
   <div class="tabs" id="tabs" hidden>
     <button type="button" data-t="in" class="on">Sign in</button>
     <button type="button" data-t="up">Create account</button>
@@ -71,6 +73,7 @@ fetch("/api/auth/status").then((r) => r.json()).then((s) => {
     u.type = "email";
     document.getElementById("tabs").hidden = !s.signup_open;
     document.getElementById("temp").hidden = s.persistent;
+    if (!s.signup_open) document.getElementById("closed").hidden = false;
     if (s.signup_open && new URLSearchParams(location.search).has("signup")) { tab = "up"; draw(); }
   } else {
     document.getElementById("ul").textContent = "Username";
