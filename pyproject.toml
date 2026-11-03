@@ -13,11 +13,14 @@ dependencies = [
     "reportlab>=4.1",
     "pypdf>=4",
     "pypdfium2>=4",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
-web = ["fastapi>=0.115", "uvicorn>=0.30", "claude-agent-sdk>=0.2"]
+# the Claude co-author (bundles the Claude Code CLI, ~260 MB: left out of the Vercel build)
+web = ["claude-agent-sdk>=0.2"]
 
 [project.scripts]
 bookforge = "bookforge.cli:app"
@@ -32,3 +35,6 @@ include = ["bookforge*"]
 
 [tool.setuptools.package-data]
 bookforge = ["fonts/*.ttf", "web/static/*", "template_presets/*.yaml"]
+
+[tool.vercel]
+entrypoint = "bookforge.web.app:app"

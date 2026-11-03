@@ -199,7 +199,11 @@ def _with_images(prompt: str, images):
 async def ask(prompt: str, system: str, schema: dict | None = None, images=()):
     """One Claude turn with no tools. Returns text, or the parsed object when `schema` is given.
     `images` are local image files shown to Claude with the prompt."""
-    from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
+    try:
+        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
+    except ImportError as e:
+        raise AuthorError("Claude isn't available on this server (claude-agent-sdk is not installed; it is left "
+                          "out of the Vercel build). Run MosiBooks on your own computer to write books with Claude.") from e
 
     s = settings.load()
     s.apply_env()

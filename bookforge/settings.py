@@ -11,7 +11,10 @@ from pydantic import BaseModel
 
 from . import kdp
 
-PATH = Path(os.environ.get("BOOKFORGE_HOME", Path.home() / ".bookforge")) / "settings.json"
+# on Vercel only /tmp is writable (and it is wiped between cold starts)
+ON_VERCEL = bool(os.environ.get("VERCEL"))
+_DEFAULT_HOME = Path("/tmp/bookforge") if ON_VERCEL else Path.home() / ".bookforge"
+PATH = Path(os.environ.get("BOOKFORGE_HOME", _DEFAULT_HOME)) / "settings.json"
 SECRETS = ("openai_api_key", "anthropic_api_key")
 SPEND = PATH.parent / "spend.json"   # every paid image: when, estimated USD, book, slot
 BUY_CREDITS_URL = "https://platform.openai.com/settings/organization/billing/overview"
@@ -22,7 +25,7 @@ class Settings(BaseModel):
     openai_api_key: str = ""
     anthropic_api_key: str = ""   # optional: when empty, Claude runs on the Claude Code login
     claude_model: str = "claude-opus-5-5"
-    books_dir: str = str(Path.cwd() / "books")
+    books_dir: str = str(Path("/tmp/bookforge/books") if ON_VERCEL else Path.cwd() / "books")
     default_author: str = ""
     default_trim: str = "8.5x8.5"
     default_paper: str = "premium_color"
