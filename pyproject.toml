@@ -1,0 +1,34 @@
+[project]
+name = "bookforge"
+version = "0.1.0"
+description = "Story + illustration prompts in, Amazon KDP print-ready interior and cover PDFs out."
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.60",
+    "pydantic>=2.6",
+    "pyyaml>=6",
+    "typer>=0.12",
+    "rich>=13",
+    "pillow>=10",
+    "reportlab>=4.1",
+    "pypdf>=4",
+    "pypdfium2>=4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+web = ["fastapi>=0.115", "uvicorn>=0.30", "claude-agent-sdk>=0.2"]
+
+[project.scripts]
+bookforge = "bookforge.cli:app"
+mosibooks = "bookforge.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bookforge*"]
+
+[tool.setuptools.package-data]
+bookforge = ["fonts/*.ttf", "web/static/*", "template_presets/*.yaml"]

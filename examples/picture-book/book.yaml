@@ -1,0 +1,82 @@
+title: Pip and the Lantern of Lost Stars
+author: Your Name
+type: picture_book
+trim: 8.5x8.5
+paper: premium_color
+style: >
+  Hand-painted children's picture-book illustration in soft watercolor and gouache with
+  visible paper grain, warm golden lamplight against deep twilight blues, gentle rounded
+  shapes, expressive faces, cozy and magical mood, consistent soft lighting.
+lettering: rounded, friendly hand-lettered serif in warm cream ink with a soft glow, generous spacing
+palette: ["#E07A3F", "#1F3B5C", "#F4D58D", "#7FA88B"]
+characters:
+  - name: Pip
+    description: a small red fox kit with a cream-tipped tail, big amber eyes, wearing a
+      knitted mustard-yellow scarf
+  - name: Grandma Owl
+    description: an old barn owl with round spectacles, a lavender shawl and soft speckled feathers
+front_matter:
+  dedication: For everyone who is a little afraid of the dark.
+cover_prompt: >
+  Pip the fox holding up a glowing paper lantern on a grassy hill at night, hundreds of
+  tiny stars swirling out of the lantern into a deep blue sky
+back_cover:
+  blurb: >
+    The stars over Willowmere are going out, one by one. When Grandma Owl gives Pip an old
+    paper lantern, the smallest fox in the woods sets off to bring them home.
+    A gentle bedtime adventure about courage, kindness and the light we carry inside.
+about_author: Your Name writes stories at the kitchen table, usually long after bedtime.
+images:
+  quality: medium
+  text_in_art: true   # the words are lettered into each illustration
+pages:
+  - text: In the woods of Willowmere, where the river hums, lived a little fox named Pip.
+    prompt: Pip sitting on a mossy log on the right side of the scene, a gently flowing river winding through the left side at dusk, fireflies, tall willow trees
+    layout: spread
+  - text: Every night, Pip counted the stars before bed. One, two, three... all the way to a hundred.
+    prompt: Pip lying on his back in a meadow pointing up at a sky full of stars
+  - text: But one night, Pip could only count to ninety-nine.
+    prompt: Pip sitting up with a worried face, looking at a sky with a dark gap among the stars
+    layout: split
+  - text: The next night, there were only fifty.
+    prompt: Pip at his burrow entrance looking up at a dimmer night sky, ears drooping
+    layout: spot
+  - text: "\"Grandma Owl,\" whispered Pip, \"where are the stars going?\""
+    prompt: Pip at the foot of a huge old oak tree, Grandma Owl peering down from a hollow lit by a candle
+  - text: Grandma Owl blinked slowly. "Stars get lost, just like little foxes. Sometimes they need help finding their way home."
+    prompt: Grandma Owl inside her cozy tree hollow full of books, Pip sitting beside her
+    layout: split
+  - text: She gave Pip an old paper lantern. "Carry this. Lost things follow a kind light."
+    prompt: Grandma Owl handing Pip a softly glowing paper lantern, warm light on their faces
+  - text: So Pip set off into the dark, dark woods.
+    prompt: Pip small on the right side, walking alone on a winding forest path at night holding the lantern, tall dark trees filling the left side, the lantern the only warm light
+    layout: spread
+    text_position: top
+  - text: The shadows looked like monsters. Pip's paws trembled. But the lantern glowed, steady and warm.
+    prompt: Pip on the forest path, branches casting shadows shaped like claws, the lantern pushing the shadows back
+  - text: Near the brambles, something tiny flickered. A star! Caught in the thorns and crying silver tears.
+    prompt: a tiny glowing star tangled in a bramble bush, Pip kneeling to look at it gently
+    layout: split
+  - text: Pip untangled it, very, very carefully. The little star hopped into the lantern and shone.
+    prompt: Pip gently freeing the star from the thorns, the star floating toward the open lantern
+    layout: spot
+  - text: There were stars in the pond, pretending to be reflections.
+    prompt: Pip at the edge of a still pond at night, lily pads, several real tiny stars bobbing on the water
+  - text: Stars hiding in the hollow log. Stars asleep in the bluebells.
+    prompt: Pip peeking into a hollow log full of sleepy glowing stars, bluebells around
+    layout: split
+  - text: The lantern grew brighter and brighter, until the whole woods glowed like morning.
+    prompt: Pip on the left side holding a dazzling lantern full of stars, the forest lit up gold, rabbits, deer and hedgehogs peeking out from bushes on the right side in wonder
+    layout: spread
+  - text: At the top of Moon Hill, Pip opened the lantern. "Go home," he said.
+    prompt: Pip on top of a grassy hill under a huge moon opening the lantern
+  - text: And the stars rose up, swirling and singing, back into the sky.
+    prompt: hundreds of stars spiraling up out of the lantern into the night sky, Pip watching with open mouth
+    layout: full_bleed
+    text_position: bottom
+  - text: That night Pip counted all the way to a hundred... and one.
+    prompt: Pip snuggled in his burrow bed by a small window showing a full starry sky, one extra star winking
+    layout: split
+  - text: Because when you carry a kind light, you are never really in the dark.
+    prompt: Pip asleep curled around the empty lantern, which still glows faintly
+    layout: spot

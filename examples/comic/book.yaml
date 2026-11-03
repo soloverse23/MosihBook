@@ -1,0 +1,75 @@
+title: Robo-Gardener
+author: Your Name
+type: comic
+trim: 7x10
+paper: premium_color
+style: >
+  Bright, clean modern comic-book art with bold ink outlines, flat cel shading and a cheerful
+  saturated palette, expressive characters, dynamic camera angles.
+characters:
+  - name: Bolt
+    description: a small round robot with a dented teal body, one big glowing blue eye, a tiny
+      watering-can arm and treads instead of feet
+  - name: Juno
+    description: a 9-year-old girl with short orange hair, freckles, green overalls and muddy sneakers
+cover_prompt: Bolt the robot holding a single sprouting seedling up to the sun on a city rooftop garden
+back_cover:
+  blurb: A rusty robot. A rooftop full of dirt. One very stubborn seed. Can Bolt grow a garden before the city tears the rooftop down?
+pages:
+  - prompt: a gray rooftop in a busy futuristic city at sunrise, Bolt alone among empty flowerpots
+    text: Everyone in the city had forgotten about the rooftop. Everyone except Bolt.
+  - panels:
+      - prompt: Bolt carefully pouring a single drop of water onto a pot of bare soil
+        bubbles:
+          - text: Day 41. Still nothing.
+            kind: caption
+            position: top_left
+      - prompt: close-up of Bolt's big blue eye staring at the soil, reflecting it
+        bubbles:
+          - text: Grow. Please grow.
+            kind: thought
+            position: top_right
+      - prompt: Juno climbing up onto the rooftop through a hatch, surprised to see Bolt
+        bubbles:
+          - text: Whoa! A robot? Up here?
+            speaker: Juno
+            position: top_left
+      - prompt: Bolt startled, nearly dropping its watering-can arm, facing Juno
+        bubbles:
+          - text: Beep! I am... gardening.
+            speaker: Bolt
+            position: top_right
+  - panels:
+      - prompt: Juno kneeling by the pot, poking the soil with a finger, Bolt watching nervously
+        bubbles:
+          - text: This dirt is way too dry. Plants need sun AND water.
+            speaker: Juno
+            position: top_left
+      - prompt: Juno and Bolt pushing the pot together into a bright patch of sunlight
+        bubbles:
+          - text: Teamwork!
+            speaker: Juno
+            position: top
+      - prompt: wide shot of the rooftop at sunset, Juno and Bolt sitting side by side next to the pot
+        bubbles:
+          - text: Later that day...
+            kind: caption
+            position: top_left
+          - text: Same time tomorrow?
+            speaker: Juno
+            position: top_right
+  - panels:
+      - prompt: extreme close-up of a tiny green sprout breaking through the soil, morning dew
+      - prompt: Bolt's eye glowing extra bright with joy, little sparkles around him
+        bubbles:
+          - text: JUNO! JUNO!
+            speaker: Bolt
+            position: top_left
+      - prompt: Juno and Bolt cheering with arms raised next to the sprout, city skyline behind
+        bubbles:
+          - text: It's alive!
+            speaker: Juno
+            position: top_right
+          - text: To be continued...
+            kind: caption
+            position: bottom_right

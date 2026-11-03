@@ -1,0 +1,104 @@
+title: The Clockmaker's Apprentice
+author: Your Name
+type: storybook
+trim: 6x9
+paper: cream_bw
+style: >
+  Classic pen-and-ink book illustration with fine cross-hatching, black ink on warm white
+  paper, Victorian storybook feel, detailed but uncluttered.
+lettering: elegant engraved-style book serif in dark sepia ink, like a Victorian storybook, easy to read
+images:
+  text_in_art: true   # the words are lettered into each illustration
+characters:
+  - name: Ada
+    description: a 12-year-old girl with a long dark braid, round brass goggles pushed up on her
+      forehead, a patched leather apron over a striped dress
+  - name: Master Hollis
+    description: a tall, thin elderly clockmaker with a white moustache, a waistcoat full of tools
+      and a magnifying loupe on a chain
+cover_prompt: >
+  Ada standing inside a giant clock tower among enormous turning brass gears, looking up at a
+  shaft of light, rendered as a richly colored engraving
+back_cover:
+  blurb: >
+    Every clock in the town of Bellwick has stopped at 3:17 - except one. Ada, apprentice to the
+    oldest clockmaker in the country, is the only person who can still hear it ticking. To find
+    it she must climb the forbidden tower, solve the riddle of the silent bells, and decide what
+    she is willing to give for a little more time.
+pages:
+  - chapter: "Chapter One: 3:17"
+    prompt: Ada at a cluttered clockmaker's workbench at night, holding up a tiny gear to a lamp,
+      clocks on the wall above, calm dark floorboards along the bottom
+    characters: [Ada]
+    illustration: opener
+    text: |
+      The clocks of Bellwick stopped on a Tuesday.
+      Ada thought that was rude of them,
+      because Tuesday was her day to wind the big clock in the shop window.
+
+      The kitchen clock said 3:17.
+      The church clock said 3:17.
+      Even Master Hollis's pocket watch said 3:17.
+  - prompt: Master Hollis peering through his loupe at a still pocket watch on a velvet stand, Ada
+      beside him pressing her ear to a tall clock case, plain shop wall above
+    characters: [Ada, Master Hollis]
+    illustration: opener
+    text_position: top
+    text: |
+      "Curious," said Master Hollis,
+      which was what he said when something was very wrong.
+
+      Ada pressed her ear to every clock in the shop.
+      Nothing. Nothing. Nothing.
+
+      And then, far away and high above the town,
+      she heard it: tick... tick... tick.
+  - prompt: Ada at a frosty window pointing toward a distant crooked clock tower on a hill, the old
+      clockmaker behind her, calm wooden floor along the bottom
+    characters: [Ada, Master Hollis]
+    illustration: opener
+    text: |
+      "Do you hear that?" she asked.
+      "Hear what, child?"
+
+      The ticking came from the north,
+      from the old tower behind its rusted gate.
+      Nobody had climbed the tower in a hundred years.
+  - chapter: "Chapter Two: The Forbidden Tower"
+    prompt: a tall crooked stone clock tower behind a rusted iron gate in fog, Ada small at the gate,
+      wide misty sky above
+    characters: [Ada]
+    illustration: opener
+    text_position: top
+    text: |
+      The gate was locked,
+      but locks were only clocks that had forgotten the time,
+      and Ada had been taking clocks apart since she was four.
+  - prompt: Ada climbing a winding stone staircase holding a lantern, a cracked green bell hanging
+      beside her, soft darkness below
+    characters: [Ada]
+    illustration: opener
+    text: |
+      A staircase wound up into the dark.
+      With every step the ticking grew louder,
+      until Ada could feel it in her teeth.
+
+      At the hundredth step she found an old cracked bell,
+      and she kept climbing.
+  - prompt: Ada standing in a round room of huge slowly turning gears, looking at a tiny brass clock
+      on a black iron pedestal, quiet stone floor along the bottom
+    characters: [Ada]
+    illustration: opener
+    text: |
+      At the top was a room made entirely of gears.
+      In the middle sat a brass clock no bigger than an apple.
+      It was the only thing in Bellwick still telling the time.
+
+      "Hello," said Ada.
+      "Hello," said the clock.
+  - text: |
+      A NOTE ON CLOCKS
+
+      A regulator is a very accurate clock that clockmakers use to set every other clock in the shop.
+      A long-case clock is a tall clock that stands on the floor, often called a grandfather clock.
+      An escapement is the small part inside a clock that lets the gears turn one tick at a time.
