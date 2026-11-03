@@ -8,3 +8,4 @@ books/
 node_modules/
 .vercel/
 *.part
+build/
