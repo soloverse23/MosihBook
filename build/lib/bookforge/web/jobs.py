@@ -1,6 +1,7 @@
 """Pipeline runs in background threads, with a log the browser polls."""
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 import traceback
@@ -31,6 +32,7 @@ class Job:
     result: dict = field(default_factory=dict)
     started: float = field(default_factory=time.time)
     ended: float = 0.0
+    user: str | None = None   # the account that started it (None: single-user studio)
     # live image progress: filled by generate.run's progress callback
     total: int = 0
     phase: str = ""
@@ -67,7 +69,14 @@ _lock = threading.Lock()
 
 
 def running(slug: str) -> Job | None:
-    return next((j for j in JOBS.values() if j.slug == slug and j.status == "running"), None)
+    me = settings.current_user.get()
+    return next((j for j in JOBS.values() if j.slug == slug and j.user == me and j.status == "running"), None)
+
+
+def get(job_id: str) -> Job | None:
+    """A job, only for the account that started it."""
+    j = JOBS.get(job_id)
+    return j if j and j.user == settings.current_user.get() else None
 
 
 def start(slug: str, kind: str, slots: list[str] | None = None, note: str | None = None,
@@ -77,15 +86,18 @@ def start(slug: str, kind: str, slots: list[str] | None = None, note: str | None
     with _lock:
         if running(slug):
             raise RuntimeError("a job is already running for this book")
-        job = Job(uuid.uuid4().hex[:12], slug, kind)
+        job = Job(uuid.uuid4().hex[:12], slug, kind, user=settings.current_user.get())
         JOBS[job.id] = job
-    threading.Thread(target=_run, args=(job, slots, note, pilot_pages, force), daemon=True).start()
+    # the thread runs in this request's context, so it works on the same account's books and keys
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(_run, job, slots, note, pilot_pages, force), daemon=True).start()
     return job
 
 
 def _run(job: Job, slots, note, pilot_pages, force) -> None:
     try:
-        settings.load().apply_env()
+        if job.user is None:
+            settings.load().apply_env()
         mock = job.kind == "mock"
         p = Project(state.book_dir(job.slug) / "book.yaml", mock)
         if job.kind in ("pilot", "art"):

@@ -196,9 +196,58 @@ def _with_images(prompt: str, images):
     return gen()
 
 
+async def _ask_api(key: str, model: str, prompt: str, system: str, schema: dict | None, images) -> str:
+    """One turn on the Claude API with this studio's (or account's) own key. Streams, because a whole
+    book.yaml is a long answer."""
+    import anthropic
+    if schema:
+        prompt += ("\n\nReply with only a JSON object (in one ```json block) that matches this JSON schema:\n"
+                   + json.dumps(schema))
+    content = [b for p in images for b in ({"type": "text", "text": f"Attached image: {Path(p).name}"},
+                                           _image_block(Path(p)))] + [{"type": "text", "text": prompt}]
+    client = anthropic.AsyncAnthropic(api_key=key)
+    req = dict(model=model, max_tokens=64000, system=system, output_config={"effort": "high"},
+               messages=[{"role": "user", "content": content}])
+    try:
+        try:  # on a safety decline the API retries on a fallback model in the same call
+            async with client.beta.messages.stream(**req, betas=["server-side-fallback-2026-07-01"],
+                                                   fallbacks="default") as stream:
+                msg = await stream.get_final_message()
+        except anthropic.BadRequestError as e:
+            if "fallback" not in str(e).lower():
+                raise
+            async with client.messages.stream(**req) as stream:  # account without the fallback beta
+                msg = await stream.get_final_message()
+    except anthropic.AuthenticationError as e:
+        raise AuthorError("Anthropic rejected the API key. Check it in Settings > Claude.") from e
+    except anthropic.PermissionDeniedError as e:
+        raise AuthorError(f"This Anthropic key can't use {model}: {e.message}") from e
+    except anthropic.RateLimitError as e:
+        raise AuthorError("Anthropic rate limit or credit limit reached; try again in a minute "
+                          "or add credit at console.anthropic.com.") from e
+    except anthropic.APIStatusError as e:
+        raise AuthorError(f"Claude API error ({e.status_code}): {e.message}") from e
+    except anthropic.APIConnectionError as e:
+        raise AuthorError("Couldn't reach the Claude API (network).") from e
+    if msg.stop_reason == "refusal":
+        raise AuthorError("Claude declined this request. Rephrase the brief and try again.")
+    if msg.stop_reason == "max_tokens":
+        raise AuthorError("Claude's answer was cut off (too long). Shorten the book or the request.")
+    return "".join(b.text for b in msg.content if b.type == "text")
+
+
 async def ask(prompt: str, system: str, schema: dict | None = None, images=()):
     """One Claude turn with no tools. Returns text, or the parsed object when `schema` is given.
-    `images` are local image files shown to Claude with the prompt."""
+    `images` are local image files shown to Claude with the prompt.
+
+    With an Anthropic API key (always the case for accounts on a server) it calls the Claude API
+    directly; otherwise it runs on the Claude Code login of this computer (claude-agent-sdk)."""
+    s = settings.load()
+    if s.anthropic_api_key:
+        text = await _ask_api(s.anthropic_api_key, s.claude_model, prompt, system, schema, images)
+        return json.loads(_fenced(text, "json")) if schema else text
+    if settings.current_user.get():
+        raise AuthorError("Connect Claude first: add your Anthropic API key in Settings > Claude.")
     try:
         from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
     except ImportError as e:

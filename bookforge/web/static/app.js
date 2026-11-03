@@ -1272,7 +1272,7 @@ function guide(anchor) {
 // ---------- settings ----------
 async function settingsView() {
   settingsCache = null;
-  const { settings: s, trims, path, credit } = await getSettings();
+  const { settings: s, trims, path, credit, server } = await getSettings();
   const input = (k, opts = {}) => opts.select
     ? `<select class="input" id="s-${k}" name="${k}">${opts.select.map(([v, t]) => `<option value="${v}" ${String(s[k]) === String(v) ? "selected" : ""}>${t}</option>`).join("")}</select>`
     : `<input class="input ${opts.type === "number" ? "num" : ""}" id="s-${k}" name="${k}" type="${opts.type || "text"}" value="${esc(s[k])}" ${opts.step ? `step="${opts.step}"` : ""} autocomplete="off" spellcheck="false" ${opts.ph ? `placeholder="${esc(opts.ph)}"` : ""}>`;
@@ -1280,12 +1280,14 @@ async function settingsView() {
     ${opts.secret ? `<div class="input-group">${input(k, { ...opts, type: "password" })}<button type="button" class="btn icon" data-reveal="s-${k}" aria-label="Show">${icon("eye")}</button></div>` : input(k, opts)}
     ${opts.hint ? `<span class="hint">${opts.hint}</span>` : ""}</div>`;
   view.innerHTML = `<div class="page">
-    <div class="head"><div><h1>Settings</h1><p class="sub">Stored only on this Mac in <code>${esc(path)}</code>, readable by you only.</p></div>
+    <div class="head"><div><h1>Settings</h1><p class="sub">${server ? "Your own settings and keys, saved with your account. Other people on this server can't see them."
+      : `Stored only on this Mac in <code>${esc(path)}</code>, readable by you only.`}</p></div>
       <a class="btn sm" href="#/setup">${icon("sparkle")}Run setup again</a></div>
     <form id="sf">
-      <div class="sgroup"><div class="about"><h2>Claude</h2><p>Asks the questions and writes the outline, manuscript and listing. By default it uses the Claude account you're logged into in Claude Code.</p></div>
+      <div class="sgroup"><div class="about"><h2>Claude</h2><p>Asks the questions and writes the outline, manuscript and listing. ${server ? "It uses your own Anthropic API key." : "By default it uses the Claude account you're logged into in Claude Code."}</p></div>
         <div class="stack"><div class="form-grid">
-          ${field("anthropic_api_key", "Anthropic API key", { secret: true, ph: "Leave empty to use your Claude login", hint: "Optional. Set it to pay per token instead of using your subscription.", full: true })}
+          ${field("anthropic_api_key", "Anthropic API key", server ? { secret: true, ph: "sk-ant-…", hint: `Required. Create one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.`, full: true }
+            : { secret: true, ph: "Leave empty to use your Claude login", hint: "Optional. Set it to pay per token instead of using your subscription.", full: true })}
           ${field("claude_model", "Model", { select: [["claude-opus-5-5", "Opus 5.5 · best writing"], ["claude-sonnet-5-5", "Sonnet 5.5 · faster"], ["claude-fable-5-1", "Fable 5.1"], ["claude-haiku-5-5", "Haiku 5.5 · fastest"]] })}
         </div><div class="testline"><button type="button" class="btn sm" data-test="claude">Test connection</button><span id="t-claude"></span></div></div></div>
 
@@ -1304,7 +1306,7 @@ async function settingsView() {
           ${field("review", "Vision review", { select: [["true", "On · flags problems, never redraws"], ["false", "Off · cheapest"]] })}
           ${field("est_cost_per_image_usd", "Cost per image (USD)", { type: "number", step: "0.01", hint: "Only used for estimates." })}
           ${field("max_workers", "Parallel requests", { type: "number" })}
-          ${field("realesrgan_path", "Real-ESRGAN binary", { ph: "Auto-detected", hint: "Optional, for sharper upscaling.", full: true })}
+          ${server ? "" : field("realesrgan_path", "Real-ESRGAN binary", { ph: "Auto-detected", hint: "Optional, for sharper upscaling.", full: true })}
         </div><div class="testline"><button type="button" class="btn sm" data-test="openai">Test key</button><span id="t-openai"></span></div></div></div>
 
       <div class="sgroup"><div class="about"><h2>Defaults</h2><p>Prefilled on every new book.</p></div>
@@ -1312,7 +1314,7 @@ async function settingsView() {
           ${field("default_author", "Author name", { full: true })}
           ${field("voice_lang", "Voice input language", { select: [["fa-IR", "فارسی · Persian"], ["en-US", "English"], ["fr-FR", "Français"], ["de-DE", "Deutsch"], ["es-ES", "Español"]], hint: "The language you speak into the mic buttons." })}
           ${field("default_trim", "Trim size", { select: trims.map((t) => [t, t]) })}
-          ${field("books_dir", "Books folder", { full: true })}
+          ${server ? "" : field("books_dir", "Books folder", { full: true })}
         </div></div>
       <div class="savebar" id="savebar" hidden><span class="small muted">You have unsaved changes.</span>
         <div class="row"><button type="button" class="btn sm ghost" id="reset">Discard</button><button class="btn sm primary" type="submit">Save changes</button></div></div>
@@ -1351,23 +1353,24 @@ async function setupView(step) {
   const bar = `<ol class="setup-bar">${SETUP_STEPS.map((l, i) =>
     `<li class="${i + 1 < step ? "done" : i + 1 === step ? "current" : ""}"><span class="dot">${i + 1 < step ? icon("check") : i + 1}</span>${l}</li>`).join("")}</ol>`;
   const shell = (body) => `<div class="page setup">
-    <div class="setup-hero"><h1>Welcome to MosiBooks</h1><p class="muted">Two quick connections and you're ready to make your first book. About 3 minutes.</p></div>
+    <div class="setup-hero"><h1>Welcome to MosiBooks</h1><p class="muted">${st.user ? `Signed in as <b>${esc(st.user)}</b>. ` : ""}Two quick connections and you're ready to make your first book. About 3 minutes.</p></div>
     ${bar}<div class="card"><div class="card-b">${body}</div></div></div>`;
   const result = (id) => `<div class="setup-result" id="${id}"></div>`;
   const show = (id, ok, msg) => ($(`#${id}`).innerHTML = note(ok ? "ok" : "err", msg));
 
   if (step === 1) {
-    const sub = !s.anthropic_api_key;
+    const sub = !st.server && !s.anthropic_api_key;
     view.innerHTML = shell(`
       <h2>Connect Claude</h2>
       <p class="muted small">Claude asks you about your idea and writes the outline, the story and the Amazon listing. Pick how to connect:</p>
       <div class="choices">
-        <label class="choice"><input type="radio" name="how" value="sub" ${sub ? "checked" : ""}>
+        <label class="choice" ${st.server ? "hidden" : ""}><input type="radio" name="how" value="sub" ${sub ? "checked" : ""}>
           <div><b>My Claude subscription</b> <span class="badge ok">Recommended</span>
           <div class="faint small">Uses the Claude account signed in to Claude Code on this computer. No extra cost.</div></div></label>
         <label class="choice"><input type="radio" name="how" value="key" ${sub ? "" : "checked"}>
           <div><b>An Anthropic API key</b>
-          <div class="faint small">Pay per use from console.anthropic.com. Good on a server without Claude Code.</div></div></label>
+          <div class="faint small">${st.server ? "Your own key: what Claude writes for your books is billed to your Anthropic account."
+            : "Pay per use from console.anthropic.com. Good on a server without Claude Code."}</div></div></label>
       </div>
       <div id="how-sub" class="how">
         ${st.claude.logged_in
@@ -1400,7 +1403,7 @@ async function setupView(step) {
         if (now.claude?.logged_in) { toast("Signed in to Claude"); setupView(1); } else waitForLogin(deadline);
       }, 2500);
     };
-    if ($("#signin")) {
+    if ($("#signin") && !st.server) {
       $("#signin").onclick = () => busy($("#signin"), "Opening", async () => {
         await api("POST", "/api/setup/claude-login");
         $("#signin-msg").textContent = "Approve the sign-in in your browser tab. This page updates by itself.";
@@ -1498,5 +1501,6 @@ fetch("/api/auth/status").then((r) => r.json()).then((s) => {
   if (!s.enabled) return;
   const b = document.getElementById("signout");
   b.hidden = false;
+  if (s.mode === "accounts" && s.user) { b.textContent = `Sign out · ${s.user}`; b.title = s.user; }
   b.onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login"; };
 }).catch(() => {});

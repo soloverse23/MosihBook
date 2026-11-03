@@ -22,7 +22,7 @@ from .spec import Character
 
 def library_dir() -> Path:
     """The shared library, next to the studio settings (follows BOOKFORGE_HOME)."""
-    return settings.PATH.parent / "characters"
+    return settings.home() / "characters"
 
 
 def char_id(name: str) -> str:

@@ -8,14 +8,20 @@
   *{box-sizing:border-box}
   body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f7;color:#1a1a1a;
        font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
-  .card{background:#fff;width:min(380px,92vw);padding:32px;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.08)}
+  .card{background:#fff;width:min(400px,92vw);padding:32px;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.08)}
   .brand{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:22px;font-weight:700;font-size:20px;color:#2B4ACB}
+  .tabs{display:flex;gap:4px;background:#eef0f3;padding:3px;border-radius:9px;margin-bottom:6px}
+  .tabs button{flex:1;margin:0;padding:8px;background:none;color:#555;font-weight:500}
+  .tabs button.on{background:#fff;color:#1a1a1a;box-shadow:0 1px 3px rgba(0,0,0,.1)}
   label{display:block;margin:14px 0 6px;font-size:14px}
   input{width:100%;padding:11px 12px;border:1px solid #cfd3d9;border-radius:8px;font:inherit}
   input:focus{outline:2px solid #2B4ACB;border-color:transparent}
   button{width:100%;margin-top:20px;padding:12px;border:0;border-radius:8px;background:#2B4ACB;color:#fff;font:inherit;font-weight:600;cursor:pointer}
   button:disabled{opacity:.6}
+  .hint{font-size:12px;color:#6b7280;margin-top:6px}
   .err{color:#c0262d;font-size:14px;margin-top:12px;min-height:18px;text-align:center}
+  .warn{background:#fff7e6;color:#8a5300;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:8px}
+  [hidden]{display:none!important}
 </style>
 </head>
 <body>
@@ -24,11 +30,22 @@
     <svg width="28" height="28" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M9 9.5c2.6-.9 5-.6 7 .9v12.6c-2-1.5-4.4-1.8-7-.9zM23 9.5c-2.6-.9-5-.6-7 .9v12.6c2-1.5 4.4-1.8 7-.9z" fill="#fff"/></svg>
     MosiBooks
   </div>
+  <div class="warn" id="temp" hidden>Accounts on this server aren't stored permanently yet (no database connected). Ask the owner to connect Upstash Redis.</div>
+  <div class="tabs" id="tabs" hidden>
+    <button type="button" data-t="in" class="on">Sign in</button>
+    <button type="button" data-t="up">Create account</button>
+  </div>
   <form id="f">
-    <label for="u">Username</label>
+    <label for="u" id="ul">Email</label>
     <input id="u" autocomplete="username" required autofocus>
     <label for="p">Password</label>
-    <input id="p" type="password" autocomplete="current-password" required>
+    <input id="p" type="password" autocomplete="current-password" required minlength="1">
+    <div id="up-only" hidden>
+      <div class="hint">At least 8 characters.</div>
+      <label for="c">Invite code</label>
+      <input id="c" autocomplete="off" spellcheck="false">
+      <div class="hint">From the person who runs this MosiBooks server.</div>
+    </div>
     <button id="b">Sign in</button>
     <div class="err" id="e"></div>
   </form>
@@ -36,15 +53,39 @@
 <script>
 const q = new URLSearchParams(location.search).get("next");
 const next = q && /^\/[A-Za-z0-9_\-\/.]*$/.test(q) && !q.startsWith("//") ? q : "/";
-fetch("/api/auth/status").then(r => r.json()).then(s => { if (!s.enabled || s.signed_in) location.replace(next); });
+let tab = "in", mode = "password";
+const draw = () => {
+  document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x.dataset.t === tab));
+  document.getElementById("up-only").hidden = tab !== "up";
+  c.required = tab === "up";
+  p.autocomplete = tab === "up" ? "new-password" : "current-password";
+  p.minLength = tab === "up" ? 8 : 1;
+  b.textContent = tab === "up" ? "Create account" : "Sign in";
+  e.textContent = "";
+};
+document.querySelectorAll("#tabs button").forEach((x) => (x.onclick = () => { tab = x.dataset.t; draw(); }));
+fetch("/api/auth/status").then((r) => r.json()).then((s) => {
+  if (!s.enabled || s.signed_in) return location.replace(next);
+  mode = s.mode;
+  if (mode === "accounts") {
+    u.type = "email";
+    document.getElementById("tabs").hidden = !s.signup_open;
+    document.getElementById("temp").hidden = s.persistent;
+    if (s.signup_open && new URLSearchParams(location.search).has("signup")) { tab = "up"; draw(); }
+  } else {
+    document.getElementById("ul").textContent = "Username";
+  }
+});
 f.onsubmit = async (ev) => {
   ev.preventDefault();
   b.disabled = true; e.textContent = "";
+  const signup = tab === "up";
   try {
-    const r = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({username: u.value.trim(), password: p.value})});
-    if (r.ok) return location.replace(next);
-    e.textContent = "Incorrect username or password";
+    const r = await fetch(signup ? "/api/signup" : "/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(signup ? {email: u.value.trim(), password: p.value, invite: c.value}
+                                  : {username: u.value.trim(), password: p.value})});
+    if (r.ok) return location.replace(signup ? "/#/setup/1" : next);
+    e.textContent = (await r.json().catch(() => ({}))).detail || "Something went wrong";
   } catch { e.textContent = "Connection error"; }
   b.disabled = false;
 };

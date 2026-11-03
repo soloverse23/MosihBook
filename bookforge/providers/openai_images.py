@@ -5,6 +5,8 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+from ..settings import openai_key as _openai_key
+
 MAX_REFS = 6
 # gpt-image-2 / 2.5 take any WxH that is a multiple of 16, within these bounds
 FLEX_MAX_EDGE = 3840
@@ -35,7 +37,7 @@ class OpenAIProvider:
 
     def __init__(self, model: str, quality: str, max_pixels: int):
         from openai import OpenAI  # imported lazily so mock runs need no key
-        self.client = OpenAI()
+        self.client = OpenAI(api_key=_openai_key())
         self.model = model
         self.quality = quality
         self.max_pixels = max_pixels

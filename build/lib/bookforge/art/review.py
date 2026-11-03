@@ -14,6 +14,8 @@ from PIL import Image
 
 from .prompting import Ref
 
+from ..settings import openai_key as _openai_key
+
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -95,7 +97,7 @@ def find_list(items: list[dict]) -> list[str]:
 class OpenAIReviewer:
     def __init__(self, model: str):
         from openai import OpenAI
-        self.client = OpenAI()
+        self.client = OpenAI(api_key=_openai_key())
         self.model = model
 
     def review(self, image: Path, prompt: str, refs: list[Ref], expected_text: str = "") -> dict:

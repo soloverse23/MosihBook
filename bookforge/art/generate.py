@@ -5,6 +5,7 @@ Nothing is ever redrawn automatically: an image is generated again only when the
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import html
 import shutil
@@ -169,7 +170,8 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
                 prev = project.art_path(s.id)
             return
         with ThreadPoolExecutor(settings.max_workers) as pool:
-            futures = {pool.submit(tracked, s): s for s in group}
+            # each worker runs in this run's context (the signed-in account's keys and spend log)
+            futures = {pool.submit(contextvars.copy_context().run, tracked, s): s for s in group}
             for f in as_completed(futures):
                 log(f"  {futures[f].id}: {f.result()}")
         reviews.save()

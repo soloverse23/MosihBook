@@ -98,7 +98,7 @@ class Template(BaseModel):
 
 
 def library_dir() -> Path:
-    return settings.PATH.parent / "templates"
+    return settings.home() / "templates"
 
 
 def slugify(name: str) -> str:
@@ -112,12 +112,34 @@ def _read(f: Path) -> Template | None:
         return None
 
 
+def _account_key() -> str | None:
+    """With accounts, saved templates live in the key-value store (they survive Vercel restarts)."""
+    u = settings.current_user.get()
+    return f"templates:{settings.user_id(u)}" if u else None
+
+
+def _saved() -> dict[str, dict]:
+    if key := _account_key():
+        from . import kv
+        return kv.get(key) or {}
+    d = library_dir()
+    return {f.stem: yaml.safe_load(f.read_text()) or {} for f in sorted(d.glob("*.yaml"))} if d.exists() else {}
+
+
+def is_saved(tid: str) -> bool:
+    return tid in _saved()
+
+
 def all_templates() -> list[Template]:
     found: dict[str, Template] = {}
-    for d in (BUILTIN, library_dir()):  # saved ones override built-ins with the same id
-        for f in sorted(d.glob("*.yaml")) if d.exists() else []:
-            if t := _read(f):
-                found[t.id] = t
+    for f in sorted(BUILTIN.glob("*.yaml")):
+        if t := _read(f):
+            found[t.id] = t
+    for tid, data in _saved().items():  # saved ones override built-ins with the same id
+        try:
+            found[tid] = Template.model_validate({**data, "id": tid})
+        except Exception:
+            pass
     return list(found.values())
 
 
@@ -127,14 +149,25 @@ def get(tid: str) -> Template | None:
 
 def save(data: dict) -> Template:
     t = Template.model_validate({**data, "id": data.get("id") or slugify(data.get("name", ""))})
-    library_dir().mkdir(parents=True, exist_ok=True)
     body = t.model_dump(exclude={"id"}, exclude_none=True)
+    if key := _account_key():
+        from . import kv
+        kv.set(key, {**_saved(), t.id: body})
+        return t
+    library_dir().mkdir(parents=True, exist_ok=True)
     (library_dir() / f"{t.id}.yaml").write_text(yaml.safe_dump(body, sort_keys=False, allow_unicode=True, width=100))
     return t
 
 
 def delete(tid: str) -> bool:
     """Remove a saved template. A built-in comes back (unedited) once its saved copy is gone."""
+    if key := _account_key():
+        from . import kv
+        saved = _saved()
+        if saved.pop(tid, None) is None:
+            return False
+        kv.set(key, saved)
+        return True
     f = library_dir() / f"{slugify(tid)}.yaml"
     if f.exists():
         f.unlink()

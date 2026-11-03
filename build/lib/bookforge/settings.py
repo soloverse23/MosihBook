@@ -1,6 +1,13 @@
-"""Studio settings: API keys and defaults, stored in ~/.bookforge/settings.json (owner-only)."""
+"""Studio settings: API keys and defaults, stored in ~/.bookforge/settings.json (owner-only).
+
+With accounts (see web/auth.py) every signed-in person has their own settings, keys and books: the
+request's account is held in `current_user`, settings live in the key-value store (bookforge/kv.py) and
+files under BASE/users/<id>/.
+"""
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import json
 import os
 import threading
@@ -16,7 +23,24 @@ ON_VERCEL = bool(os.environ.get("VERCEL"))
 _DEFAULT_HOME = Path("/tmp/bookforge") if ON_VERCEL else Path.home() / ".bookforge"
 PATH = Path(os.environ.get("BOOKFORGE_HOME", _DEFAULT_HOME)) / "settings.json"
 SECRETS = ("openai_api_key", "anthropic_api_key")
-SPEND = PATH.parent / "spend.json"   # every paid image: when, estimated USD, book, slot
+# settings an account may not change: they point at the server's own disk
+SERVER_ONLY = ("books_dir", "realesrgan_path")
+# the signed-in account of the current request (None: the single-user studio on this computer)
+current_user: contextvars.ContextVar[str | None] = contextvars.ContextVar("bookforge_user", default=None)
+
+
+def user_id(email: str) -> str:
+    return hashlib.sha256(email.lower().encode()).hexdigest()[:16]
+
+
+def home() -> Path:
+    """The folder for this studio's (or this account's) files: books, characters, spend log."""
+    u = current_user.get()
+    return PATH.parent / "users" / user_id(u) if u else PATH.parent
+
+
+def spend_path() -> Path:  # every paid image: when, estimated USD, book, slot
+    return home() / "spend.json"
 BUY_CREDITS_URL = "https://platform.openai.com/settings/organization/billing/overview"
 _spend_lock = threading.Lock()
 
@@ -66,6 +90,11 @@ class Settings(BaseModel):
 
 
 def load() -> Settings:
+    if u := current_user.get():
+        from . import kv
+        data = kv.get(f"settings:{user_id(u)}") or {}
+        data.update(books_dir=str(home() / "books"), realesrgan_path="")
+        return Settings.model_validate(data)
     return Settings.model_validate_json(PATH.read_text()) if PATH.exists() else Settings()
 
 
@@ -76,12 +105,18 @@ def save(updates: dict) -> Settings:
     for k, v in updates.items():
         if k in SECRETS and v == masked[k]:
             continue
+        if k in SERVER_ONLY and current_user.get():
+            continue
         if k == "openai_credit_usd" and float(v or 0) != current[k]:
             current["openai_credit_set_at"] = time.time()  # a new balance: count spending from now
         current[k] = v
     s = Settings.model_validate(current)
     if s.default_trim not in kdp.TRIMS:
         raise ValueError(f"trim {s.default_trim!r} not a KDP size")
+    if u := current_user.get():
+        from . import kv
+        kv.set(f"settings:{user_id(u)}", s.model_dump(exclude=set(SERVER_ONLY)))
+        return s  # keys are passed to each client explicitly, never through the shared environment
     PATH.parent.mkdir(parents=True, exist_ok=True)
     PATH.write_text(json.dumps(s.model_dump(), indent=2))
     PATH.chmod(0o600)
@@ -89,19 +124,26 @@ def save(updates: dict) -> Settings:
     return s
 
 
+def openai_key() -> str | None:
+    """This studio's (or account's) OpenAI key; None lets the client read OPENAI_API_KEY."""
+    return load().openai_api_key or None
+
+
 def record_spend(usd: float, book: str, slot: str) -> None:
     """Log one paid image (estimated cost) for the credit balance in Settings."""
     with _spend_lock:
-        entries = json.loads(SPEND.read_text()) if SPEND.exists() else []
+        f = spend_path()
+        entries = json.loads(f.read_text()) if f.exists() else []
         entries.append({"t": time.time(), "usd": round(usd, 4), "book": book, "slot": slot})
-        SPEND.parent.mkdir(parents=True, exist_ok=True)
-        SPEND.write_text(json.dumps(entries))
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(entries))
 
 
 def credit() -> dict:
     """The OpenAI balance you entered, minus the estimated cost of the images generated since."""
     s = load()
-    entries = json.loads(SPEND.read_text()) if SPEND.exists() else []
+    f = spend_path()
+    entries = json.loads(f.read_text()) if f.exists() else []
     spent = sum(e["usd"] for e in entries if e["t"] >= s.openai_credit_set_at)
     return {"balance": s.openai_credit_usd, "set_at": s.openai_credit_set_at, "spent": round(spent, 2),
             "images": sum(1 for e in entries if e["t"] >= s.openai_credit_set_at),

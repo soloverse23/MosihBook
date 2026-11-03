@@ -43,7 +43,7 @@ async def _claude(coro):
 @app.get("/api/settings")
 def get_settings():
     return {"settings": settings.load().masked(), "trims": sorted(kdp.TRIMS),
-            "papers": list(kdp.SPINE_FACTOR), "path": str(settings.PATH), "credit": settings.credit()}
+            "papers": list(kdp.SPINE_FACTOR), "path": "" if _accounts() else str(settings.PATH), "server": _accounts(), "credit": settings.credit()}
 
 
 @app.put("/api/settings")
@@ -58,6 +58,8 @@ def put_settings(updates: dict = Body(...)):
 async def test_settings(what: str):
     if what == "claude":
         s = settings.load()
+        if _accounts() and not s.anthropic_api_key:
+            raise HTTPException(400, "Add your Anthropic API key first")
         mode = "API key" if s.anthropic_api_key else "Claude Code login"
         reply = await _claude(author.ping())
         return {"ok": True, "message": f"Claude answered {reply!r} via {mode} ({s.claude_model})"}
@@ -104,10 +106,17 @@ def _claude_status() -> dict:
             "plan": d.get("subscriptionType"), "method": d.get("authMethod")}
 
 
+def _accounts() -> bool:
+    return auth.mode() == "accounts"
+
+
 @app.get("/api/setup")
 def setup_status():
     s = settings.load()
-    return {"onboarded": s.onboarded or bool(s.openai_api_key), "claude": _claude_status(),
+    server = _accounts()  # each account brings its own keys; the server's Claude login is never shared
+    return {"onboarded": s.onboarded or bool(s.openai_api_key),
+            "claude": {"installed": False, "logged_in": False} if server else _claude_status(),
+            "server": server, "user": settings.current_user.get(),
             "has_anthropic_key": bool(s.anthropic_api_key), "has_openai_key": bool(s.openai_api_key)}
 
 
@@ -115,6 +124,8 @@ def setup_status():
 def claude_login():
     """Start Claude's browser sign-in on this computer; the page polls /api/setup until it's done."""
     import subprocess
+    if _accounts():
+        raise HTTPException(400, "On this server, connect Claude with your own Anthropic API key")
     exe = _claude_bin()
     if not exe:
         raise HTTPException(400, "Claude Code isn't available; run: pip install -e '.[web]'")
@@ -276,7 +287,7 @@ def book_plan(slug: str):
 def template_library():
     """Book structure templates, plus the section kinds a template can use."""
     return {"templates": [{**t.model_dump(), "pages": t.page_count(), "builtin": templates.is_builtin(t.id),
-                           "saved": (templates.library_dir() / f"{t.id}.yaml").exists()}
+                           "saved": templates.is_saved(t.id)}
                           for t in templates.all_templates()],
             "kinds": {k: {"label": label, "guide": guide} for k, (label, guide) in templates.KINDS.items()}}
 
@@ -389,7 +400,7 @@ def start_job(slug: str, kind: str, body: dict = Body(default={})):
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str, since: int = 0):
-    job = jobs.JOBS.get(job_id)
+    job = jobs.get(job_id)
     if not job:
         raise HTTPException(404)
     return job.view(since)

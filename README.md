@@ -140,3 +140,24 @@ barcode area, and spine text only at 80+ pages.
   solutions page), **guided drawing / imagination** (big blank frame), **coloring** (black-and-white line art,
   instruction typeset above), **observation** (the find-list is read from the finished picture by the vision
   model, so everything on it is really there).
+
+## Accounts and deploying on Vercel
+
+On a server, each person creates their own account and connects their **own** OpenAI and Anthropic keys;
+they only ever see their own settings, keys, books and templates.
+
+1. In the Vercel project: **Storage → Create → Upstash (Redis)** and connect it to the project. This sets
+   `KV_REST_API_URL` and `KV_REST_API_TOKEN`; accounts, keys and saved templates are stored there.
+   (Without it, accounts vanish whenever Vercel restarts the app; the login page warns about it.)
+2. **Settings → Environment Variables**: add `MOSIBOOKS_INVITE_CODE` (any secret phrase). Only people who
+   know it can create an account. Without it, sign-up is closed. Optional: `MOSIBOOKS_SECRET` (a long random
+   string for session cookies; otherwise one is generated and kept in Redis).
+3. Redeploy. People open the site → **Create account** (email, password, invite code) → the setup wizard
+   asks for their Anthropic API key (console.anthropic.com) and OpenAI key (platform.openai.com).
+
+On Vercel, Claude runs through the Anthropic API with each person's key (the Claude Code subscription login
+only works when MosiBooks runs on your own computer). Books and images are kept in the server's temporary
+storage there, and long image runs can be cut off by Vercel's time limit: for real production, run
+`mosibooks serve --host 0.0.0.0` on a server with a disk, with the same `MOSIBOOKS_INVITE_CODE`.
+
+Locally, nothing changes: with no invite code set, MosiBooks stays a single-user studio.
