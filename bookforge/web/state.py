@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from .. import settings, spec
 
-STEPS = ["brief", "questions", "outline", "manuscript", "preview", "art", "publish"]
+STEPS = ["brief", "questions", "outline", "manuscript", "art", "publish"]
 
 
 def books_dir() -> Path:

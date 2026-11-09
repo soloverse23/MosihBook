@@ -32,6 +32,18 @@ def structured_book(text_in_art: bool) -> dict:
                             "reference", "main_game", "matching", "fill_in", "odd_one_out", "final_challenge",
                             "collection"):
                 pg.update(prompt=f"Nina and a {s.kind} scene number {k + 1}", illustration="opener")
+            if s.kind == "matching":
+                pg["matching"] = {"pairs": [["chaud", "froid"], ["petit", "grand"], ["haut", "bas"], ["jour", "nuit"]]}
+            elif s.kind in ("fill_in", "main_game"):
+                pg["fill_in"] = {"items": [{"prompt": "La mer est ___ .", "answer": "chaude"},
+                                           {"prompt": "Le contraire de petit est ___ .", "answer": "grand"},
+                                           {"prompt": "Écris une phrase avec « grand ».", "answer": "Le château est grand."}]}
+            elif s.kind == "odd_one_out":
+                pg["odd_one_out"] = {"groups": [{"items": ["chat", "chien", "pomme", "lapin"], "answer": "pomme"},
+                                                {"items": ["2", "4", "7", "8"], "answer": "7"}]}
+            elif s.kind == "final_challenge":
+                pg["certificate"] = {"title": "Bravo !", "name_label": "Prénom", "date_label": "Date"}
+                pg.pop("prompt", None)
             elif s.kind == "maze":
                 pg["maze"] = {"start": "Nina waving", "goal": "a school"}
             elif s.kind == "solutions":
@@ -106,3 +118,37 @@ def test_written_book_gets_structure_and_learning(monkeypatch):
              "structure": {"sections": structured_book(True)["sections"]}}
     out = yaml.safe_load(asyncio.run(author.write_book(brief, "outline", {"provider": "mock"})))
     assert out["learning"]["marking"] == MARKING and len(out["sections"]) == 18 and out["language"] == "French"
+
+
+def test_game_data_has_exactly_one_answer():
+    with pytest.raises(ValueError):  # two identical right items: more than one correct pairing
+        spec.MatchingSpec(pairs=[["a", "x"], ["b", "x"]])
+    with pytest.raises(ValueError):  # the answer is not in the group
+        spec.OddGroup(items=["chat", "chien", "lapin"], answer="pomme")
+    page = spec.Page(kind="matching", matching={"pairs": [["a", "b"], ["c", "d"]]})
+    assert page.drawn_activity and not spec.Page(kind="matching").drawn_activity
+
+
+def test_games_never_go_to_the_image_model_and_need_their_data():
+    data = structured_book(True)
+    book = spec.Book.model_validate(data)
+    slots = {s.id: s for s in plan(book)}
+    for n, pg in enumerate(book.pages, 1):
+        if pg.drawn_activity:
+            assert not book.lettered(pg)
+            s = slots.get(f"p{n:03d}")
+            assert s is None or (s.kind == "maze_end" and not s.lettering)
+    assert author.activity_errors(data) == []
+    del next(pg for pg in data["pages"] if pg["kind"] == "matching")["matching"]
+    assert author.activity_errors(data)
+
+
+def test_solutions_come_from_the_games(tmp_path):
+    from bookforge.layout.activities import answers, derangement
+    from bookforge.layout.base import Sheet, theme_for
+    book = spec.Book.model_validate(structured_book(False))
+    sheet = Sheet(tmp_path / "x.pdf", (8.5, 8.5), tmp_path, theme_for(book))
+    text = " ".join(getattr(f, "text", "") for b in answers(sheet, book) for f in getattr(b, "parts", [b]))
+    assert "chaud — froid" in text and "pomme" in text and "grand" in text
+    for n in range(2, 9):
+        assert all(o != i for i, o in enumerate(derangement(n, n)))

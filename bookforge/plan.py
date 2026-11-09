@@ -70,7 +70,7 @@ def needs_text_frame(book: Book) -> bool:
     if not book.images.text_in_art or book.type == "comic":
         return False
     return any(p.text.strip() and (not p.prompt or p.kind in ("solutions", "copyright")) for p in book.pages
-               if p.kind not in ("maze", "guided_drawing", "imagination"))
+               if p.kind not in ("maze", "guided_drawing", "imagination") and not p.drawn_activity)
 
 
 def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:
@@ -99,6 +99,10 @@ def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:
                 p.maze.goal)
             continue
         if p.kind in TYPESET_KINDS:  # drawn by the layout, no illustration
+            continue
+        if p.drawn_activity:  # laid out from its data; the picture is at most a small vignette beside it
+            if p.prompt and p.kind != "final_challenge":
+                add(sid, "maze_end", p.prompt, 1.0, p.characters, "")
             continue
         if p.kind == "coloring" and p.prompt:
             add(sid, "coloring", p.prompt, coloring_aspect(interior), p.characters, p.text)

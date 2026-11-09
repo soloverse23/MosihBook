@@ -59,6 +59,17 @@ def texts(data: dict, observation: dict | None = None) -> dict[str, str]:
         for j, panel in enumerate(p.get("panels") or []):
             for k, b in enumerate(panel.get("bubbles") or []):
                 put(f"pages.{i}.panels.{j}.bubbles.{k}.text", b.get("text"))
+        for j, pair in enumerate((p.get("matching") or {}).get("pairs") or []):
+            for side in (0, 1):
+                put(f"pages.{i}.matching.pairs.{j}.{side}", pair[side])
+        for j, it in enumerate((p.get("fill_in") or {}).get("items") or []):
+            put(f"pages.{i}.fill_in.items.{j}.prompt", it.get("prompt"))
+            put(f"pages.{i}.fill_in.items.{j}.answer", it.get("answer"))
+        for j, g in enumerate((p.get("odd_one_out") or {}).get("groups") or []):
+            for k, item in enumerate(g.get("items") or []):  # the answer follows its item (see apply)
+                put(f"pages.{i}.odd_one_out.groups.{j}.items.{k}", item)
+        for k in ("title", "name_label", "date_label"):
+            put(f"pages.{i}.certificate.{k}", (p.get("certificate") or {}).get(k))
     for sid, v in (observation or {}).items():
         for n, item in enumerate(v.get("items", [])):
             put(f"finds.{sid}.{n}", item.get("name"))
@@ -74,7 +85,13 @@ def apply(data: dict, translated: dict[str, str]) -> dict:
         node = out
         for part in path:
             node = node[int(part)] if isinstance(node, list) else node.setdefault(part, {})
-        node[last] = value
+        node[int(last) if isinstance(node, list) else last] = value
+    # an odd-one-out answer is one of its group's items: keep it pointing at the same item, now translated
+    for p_old, p_new in zip(data.get("pages") or [], out.get("pages") or []):
+        for g_old, g_new in zip((p_old.get("odd_one_out") or {}).get("groups") or [],
+                                (p_new.get("odd_one_out") or {}).get("groups") or []):
+            norm = [x.strip().lower() for x in g_old["items"]]
+            g_new["answer"] = g_new["items"][norm.index(g_old["answer"].strip().lower())]
     return out
 
 

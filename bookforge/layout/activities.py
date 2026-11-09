@@ -1,13 +1,14 @@
 """Activity pages drawn by the software for structured (template) books: maze, drawing pages, coloring,
-and the maze's answer on the solutions page."""
+matching, fill-in, odd one out, the final challenge's certificate, and every answer on the solutions page."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from reportlab.lib.colors import HexColor
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.units import inch
-from reportlab.platypus import Flowable
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.platypus import Flowable, Paragraph
 
 from .. import kdp, maze as mazes
 from ..plan import COLORING_HEAD, split_chapter
@@ -80,6 +81,30 @@ def maze_page(sheet: Sheet, interior: kdp.Interior, book: Book, p: Page, start: 
         sheet.image(goal, (min(x + w - end, left + cell * (m.cols - 0.5) - end / 2), bottom - end - 0.02, end, end))
 
 
+class Block(Flowable):
+    """Flowables kept on one page: a game's title with its answer. Never split, so a frame that is too full
+    moves the whole block to the next page (ReportLab's KeepTogether needs a page template to do that)."""
+    def __init__(self, parts):
+        super().__init__()
+        self.parts = parts
+
+    def wrap(self, aw, ah):
+        self._sizes = [f.wrap(aw, ah) for f in self.parts]
+        self.width = aw
+        self.height = sum(h + f.getSpaceAfter() for f, (_, h) in zip(self.parts, self._sizes))
+        return aw, self.height
+
+    def split(self, aw, ah):
+        return []
+
+    def draw(self):
+        y = self.height
+        for f, (_, h) in zip(self.parts, self._sizes):
+            y -= h
+            f.drawOn(self.canv, 0, y)
+            y -= f.getSpaceAfter()
+
+
 class MazeAnswer(Flowable):
     """A small copy of the book's maze with its path drawn in, for the solutions page."""
     def __init__(self, spec, width_in: float = 2.4):
@@ -90,8 +115,200 @@ class MazeAnswer(Flowable):
 
     def wrap(self, aw, ah):
         self._aw = aw
-        return aw, (self.h_in + 0.3) * inch
+        return aw, (self.h_in + 0.15) * inch
 
     def draw(self):
-        mazes.draw(self.canv, self.m, (self._aw / inch - self.w_in) / 2 * inch, 0.15 * inch,
+        mazes.draw(self.canv, self.m, (self._aw / inch - self.w_in) / 2 * inch, 0.05 * inch,
                    self.w_in * inch, self.h_in * inch, line=1.2, solution=True)
+
+
+# ---------- games laid out from their data (matching, fill-in, odd one out, final challenge) ----------
+VIGNETTE = 1.25   # inches: the optional small picture centered under a game
+FOLIO_ROOM = 0.42  # the page number's disc sits in the bottom outer corner
+
+
+def _body(sheet: Sheet, interior: kdp.Interior, book: Book, p: Page, art: Path | None) -> tuple:
+    """Paper, title and instruction, the optional vignette at the bottom; returns the box left for the game."""
+    sheet.paper()
+    below = heading(sheet, interior, book, p)
+    x, y, w, _ = interior.safe_box(sheet.page_no)
+    bottom = y + FOLIO_ROOM
+    if art is not None and art.exists():
+        sheet.image(art, (x + (w - VIGNETTE) / 2, y, VIGNETTE, VIGNETTE))
+        bottom = y + VIGNETTE + 0.1
+    return x, bottom, w, below - bottom - 0.15
+
+
+def _dot(sheet: Sheet, cx: float, cy: float, r: float = 0.07) -> None:
+    c = sheet.c
+    c.saveState()
+    c.setFillColor(HexColor(sheet.theme.accent))
+    c.circle(cx * inch, cy * inch, r * inch, stroke=0, fill=1)
+    c.restoreState()
+
+
+def derangement(n: int, seed: int) -> list[int]:
+    """A shuffled order where no item stays on its own row (so no pair reads straight across)."""
+    import random
+    order = list(range(n))
+    rnd = random.Random(seed)
+    for _ in range(200):
+        rnd.shuffle(order)
+        if all(o != i for i, o in enumerate(order)):
+            return order
+    return order[1:] + order[:1]
+
+
+def matching_page(sheet: Sheet, interior: kdp.Interior, book: Book, p: Page, n: int, art: Path | None) -> None:
+    """Two columns with a dot beside each item; the child draws a line from each left item to its partner."""
+    x, y, w, h = _body(sheet, interior, book, p, art)
+    pairs = p.matching.pairs
+    k = len(pairs)
+    right = derangement(k, n)
+    row = min(h / k, 1.0)
+    top = y + (h + row * k) / 2
+    col = w * 0.36
+    safe = interior.safe_box(sheet.page_no)
+    color = _color(book)
+    for i in range(k):
+        cy = top - (i + 0.5) * row
+        box_y, box_h = cy - row / 2 + 0.04, row - 0.08
+        sheet.text(para_html(pairs[i][0], color), (x, box_y, col, box_h), 16, safe=safe, min_size=8,
+                   align=TA_RIGHT)
+        sheet.text(para_html(pairs[right[i]][1], color), (x + w - col, box_y, col, box_h), 16, safe=safe,
+                   min_size=8, align=TA_LEFT)
+        _dot(sheet, x + col + 0.16, cy)
+        _dot(sheet, x + w - col - 0.16, cy)
+
+
+def _blank(html: str, accent: str) -> str:
+    import re
+    return re.sub(r"_{3,}", f'<font color="{accent}">____________</font>', html)
+
+
+def fill_in_page(sheet: Sheet, interior: kdp.Interior, book: Book, p: Page, art: Path | None) -> None:
+    """Numbered items; '___' becomes a blank to write in, an item without one gets a writing line under it."""
+    x, y, w, h = _body(sheet, interior, book, p, art)
+    items = p.fill_in.items
+    band = min(h / len(items), 1.15)
+    top = y + h
+    safe = interior.safe_box(sheet.page_no)
+    c = sheet.c
+    for i, it in enumerate(items):
+        by = top - (i + 1) * band
+        has_blank = "___" in it.prompt
+        html = f"<b>{i + 1}.</b> " + _blank(para_html(it.prompt, _color(book)), sheet.theme.accent)
+        text_h = band - 0.1 if has_blank else band * 0.6
+        sheet.text(html, (x, by + band - text_h, w, text_h), 15, valign="middle" if has_blank else "top",
+                   safe=safe, min_size=8, align=TA_LEFT)
+        if not has_blank:
+            c.saveState()
+            c.setStrokeColor(HexColor(sheet.theme.accent))
+            c.setLineWidth(1)
+            c.setDash(2, 3)
+            c.line((x + 0.3) * inch, (by + 0.14) * inch, (x + w) * inch, (by + 0.14) * inch)
+            c.restoreState()
+
+
+def odd_one_out_page(sheet: Sheet, interior: kdp.Interior, book: Book, p: Page, art: Path | None) -> None:
+    """One row of rounded tiles per group; the child circles the tile that does not belong."""
+    x, y, w, h = _body(sheet, interior, book, p, art)
+    groups = p.odd_one_out.groups
+    band = min(h / len(groups), 1.2)
+    top = y + (h + band * len(groups)) / 2
+    safe = interior.safe_box(sheet.page_no)
+    c = sheet.c
+    num_w, gap = 0.4, 0.14
+    for gi, g in enumerate(groups):
+        cy = top - (gi + 0.5) * band
+        tile_h = min(band * 0.62, 0.62)
+        sheet.text(f'<font name="{sheet.theme.heading}" color="{sheet.theme.accent}">{gi + 1}</font>',
+                   (x, cy - tile_h / 2, num_w, tile_h), 18, safe=safe, min_size=10, align=TA_CENTER)
+        m = len(g.items)
+        tw = (w - num_w - gap * (m - 1)) / m
+        for j, item in enumerate(g.items):
+            tx = x + num_w + j * (tw + gap)
+            c.saveState()
+            c.setFillColor(HexColor("#FFFFFF"))
+            c.setStrokeColor(HexColor(sheet.theme.ink))
+            c.setLineWidth(1.2)
+            c.roundRect(tx * inch, (cy - tile_h / 2) * inch, tw * inch, tile_h * inch, 0.12 * inch, stroke=1, fill=1)
+            c.restoreState()
+            sheet.text(para_html(item, _color(book)), (tx + 0.06, cy - tile_h / 2 + 0.04, tw - 0.12, tile_h - 0.08),
+                       15, safe=safe, min_size=7, align=TA_CENTER)
+
+
+def _star(sheet: Sheet, cx: float, cy: float, r: float) -> None:
+    import math
+    c = sheet.c
+    path = c.beginPath()
+    for i in range(10):
+        a = math.pi / 2 + i * math.pi / 5
+        rr = r if i % 2 == 0 else r * 0.45
+        px, py = (cx + rr * math.cos(a)) * inch, (cy + rr * math.sin(a)) * inch
+        path.moveTo(px, py) if i == 0 else path.lineTo(px, py)
+    path.close()
+    c.saveState()
+    c.setFillColor(HexColor(sheet.theme.accent))
+    c.drawPath(path, stroke=0, fill=1)
+    c.restoreState()
+
+
+def final_challenge_page(sheet: Sheet, interior: kdp.Interior, book: Book, p: Page) -> None:
+    """The last challenge on top, a small certificate with lines for the child's name and the date below."""
+    sheet.paper()
+    x, y, w, h = safe = interior.safe_box(sheet.page_no)
+    cert_h = min(3.3, h * 0.46)
+    cy0 = y + FOLIO_ROOM
+    heading(sheet, interior, book, p, height=h - cert_h - FOLIO_ROOM - 0.25)
+    cw = min(w, 5.6)
+    cx0 = x + (w - cw) / 2
+    c = sheet.c
+    c.saveState()
+    c.setFillColor(HexColor("#FFFFFF"))
+    c.setStrokeColor(HexColor(sheet.theme.accent))
+    c.setLineWidth(3)
+    c.roundRect(cx0 * inch, cy0 * inch, cw * inch, cert_h * inch, 0.2 * inch, stroke=1, fill=1)
+    c.setLineWidth(1)
+    c.roundRect((cx0 + 0.12) * inch, (cy0 + 0.12) * inch, (cw - 0.24) * inch, (cert_h - 0.24) * inch,
+                0.14 * inch, stroke=1, fill=0)
+    c.restoreState()
+    cert = p.certificate
+    _star(sheet, cx0 + cw / 2, cy0 + cert_h - 0.5, 0.26)
+    sheet.text(f'<font name="{sheet.theme.heading}">{para_html(cert.title)}</font>',
+               (cx0 + 0.3, cy0 + cert_h - 1.3, cw - 0.6, 0.5), 22, safe=safe, min_size=12, align=TA_CENTER)
+    for k, label in enumerate((cert.name_label, cert.date_label)):
+        ly = cy0 + 0.45 + (1 - k) * 0.7
+        c.setFont(sheet.theme.body, 13)
+        c.setFillColor(HexColor(sheet.theme.ink))
+        c.drawString((cx0 + 0.4) * inch, (ly + 0.1) * inch, label)
+        lx = cx0 + 0.4 + stringWidth(label, sheet.theme.body, 13) / inch + 0.12
+        c.saveState()
+        c.setStrokeColor(HexColor(sheet.theme.ink))
+        c.setLineWidth(0.8)
+        c.line(lx * inch, (ly + 0.04) * inch, (cx0 + cw - 0.4) * inch, (ly + 0.04) * inch)
+        c.restoreState()
+
+
+def answers(sheet: Sheet, book: Book) -> list:
+    """The solutions page's answers, made from the games' own data in page order (so they always match)."""
+    accent = sheet.theme.accent
+    body = sheet.style(10.5, align=TA_LEFT, leading=1.35)
+    body.spaceAfter = 6
+    out = []
+    for n, p in enumerate(book.pages, 1):
+        name = (split_chapter(p.chapter)[1] if p.chapter else "") or f"p. {n}"
+        title = f'<font name="{sheet.theme.heading}" color="{accent}">{para_html(name)}</font>'
+        if p.kind == "maze" and p.maze:
+            out.append(Block([Paragraph(title, body), MazeAnswer(p.maze, 1.4)]))
+            continue
+        if not p.drawn_activity or p.kind == "final_challenge":
+            continue
+        if p.matching:
+            lines = [f"{para_html(a)} — {para_html(b)}" for a, b in p.matching.pairs]
+        elif p.fill_in:
+            lines = [f"<b>{i}.</b> {para_html(it.answer)}" for i, it in enumerate(p.fill_in.items, 1)]
+        else:
+            lines = [f"<b>{i}.</b> {para_html(g.answer)}" for i, g in enumerate(p.odd_one_out.groups, 1)]
+        out.append(Paragraph(f"{title}&nbsp;&nbsp; " + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(lines), body))
+    return out

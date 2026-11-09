@@ -233,7 +233,6 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
         if book.front_matter.dedication:
             full_page(fm.dedication_page)
     finds = _finds(project)
-    mazes = [q.maze for q in book.pages if q.kind == "maze" and q.maze]
 
     def activity(draw):
         end_page()
@@ -254,6 +253,17 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
             continue
         if p.kind == "coloring" and p.prompt:
             activity(lambda: activities.coloring_page(sheet, interior, book, p, src))
+            continue
+        if p.drawn_activity:  # games laid out from their data, with an optional small vignette
+            vig = src if p.prompt else None
+            if p.kind == "final_challenge":
+                activity(lambda: activities.final_challenge_page(sheet, interior, book, p))
+            elif p.matching:
+                activity(lambda: activities.matching_page(sheet, interior, book, p, n, vig))
+            elif p.fill_in:
+                activity(lambda: activities.fill_in_page(sheet, interior, book, p, vig))
+            else:
+                activity(lambda: activities.odd_one_out_page(sheet, interior, book, p, vig))
             continue
         if p.kind == "observation" and p.prompt:
             items = finds.get(f"p{n:03d}", [])
@@ -300,7 +310,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 style = first if (k == 0 and p.prompt and p.illustration == "spot") else body
                 flow.append(Paragraph(text, style))
         if p.kind == "solutions":
-            flow += [activities.MazeAnswer(m) for m in mazes]
+            flow += activities.answers(sheet, book)
         pour(flow)
     end_page()
     if book.images.text_in_art and book.characters and not book.structured:

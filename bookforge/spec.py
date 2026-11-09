@@ -49,8 +49,62 @@ class MazeSpec(BaseModel):
     seed: int = 1
 
 
+class MatchingSpec(BaseModel):
+    """Draw a line from each item on the left to its partner on the right. The software shuffles the right
+    column and prints the pairs on the solutions page."""
+    pairs: list[tuple[str, str]] = Field(..., min_length=2, max_length=8)
+
+    @field_validator("pairs")
+    @classmethod
+    def _unique(cls, v):
+        for side, name in ((0, "left"), (1, "right")):
+            items = [p[side].strip().lower() for p in v]
+            if len(set(items)) != len(items) or not all(items):
+                raise ValueError(f"matching: every {name} item must be different and non-empty "
+                                 "(otherwise there is more than one correct pairing)")
+        return v
+
+
+class FillInItem(BaseModel):
+    prompt: str                  # "___" marks where the child writes; without it a writing line follows
+    answer: str
+
+
+class FillInSpec(BaseModel):
+    """Sentences, sums or questions the child completes (fill_in, and the main_game's exercise)."""
+    items: list[FillInItem] = Field(..., min_length=1, max_length=10)
+
+
+class OddGroup(BaseModel):
+    items: list[str] = Field(..., min_length=3, max_length=6)
+    answer: str                  # the one item that does not belong
+
+    @model_validator(mode="after")
+    def _one_answer(self) -> "OddGroup":
+        norm = [x.strip().lower() for x in self.items]
+        if len(set(norm)) != len(norm):
+            raise ValueError(f"odd_one_out: repeated item in {self.items}")
+        if norm.count(self.answer.strip().lower()) != 1:
+            raise ValueError(f"odd_one_out: the answer {self.answer!r} must be one of {self.items}")
+        return self
+
+
+class OddOneOutSpec(BaseModel):
+    groups: list[OddGroup] = Field(..., min_length=1, max_length=6)
+
+
+class CertificateSpec(BaseModel):
+    """The small certificate on the final challenge page, in the book's language."""
+    title: str = "Well done!"
+    name_label: str = "Name"
+    date_label: str = "Date"
+
+
 # section kinds whose page is drawn by the software: no full-page illustration, no lettering
 TYPESET_KINDS = {"guided_drawing", "imagination", "solutions", "copyright", "maze"}
+# kinds the software lays out from their data (the page field that holds it); answers go to the solutions page
+DATA_KINDS = {"matching": "matching", "fill_in": "fill_in", "main_game": "fill_in", "odd_one_out": "odd_one_out",
+              "final_challenge": "certificate"}
 # kinds whose illustration is made but whose words are typeset next to it
 UNLETTERED_KINDS = {"coloring", "observation"}
 
@@ -86,6 +140,16 @@ class Page(BaseModel):
     # structured books: the template section this page belongs to (see bookforge/templates.py)
     kind: Optional[str] = None
     maze: Optional[MazeSpec] = None
+    matching: Optional[MatchingSpec] = None
+    fill_in: Optional[FillInSpec] = None
+    odd_one_out: Optional[OddOneOutSpec] = None
+    certificate: Optional[CertificateSpec] = None
+
+    @property
+    def drawn_activity(self) -> bool:
+        """A game page laid out by the software from its data (never drawn or lettered by the image model)."""
+        field = DATA_KINDS.get(self.kind or "")
+        return bool(field and getattr(self, field) is not None)
 
     @field_validator("text")
     @classmethod
@@ -185,7 +249,7 @@ class Book(BaseModel):
 
     def lettered(self, page: "Page") -> bool:
         """Are this page's words drawn into its illustration by the image model?"""
-        if page.kind in TYPESET_KINDS or page.kind in UNLETTERED_KINDS:
+        if page.kind in TYPESET_KINDS or page.kind in UNLETTERED_KINDS or page.drawn_activity:
             return False
         on = self.images.text_in_art if page.text_in_art is None else page.text_in_art
         return bool(on and self.type != "comic" and page.prompt and (page.text.strip() or page.chapter))

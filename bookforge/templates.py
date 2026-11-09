@@ -31,14 +31,17 @@ KINDS: dict[str, tuple[str, str]] = {
                     "short definitions and examples from the story."),
     "reference": ("Learning reference", "Reference pages for the topic only (tables, word lists, worked examples, step by "
                   "step), always adapted to this book's topic: never conjugation tables in a maths book."),
-    "main_game": ("Main game", "One complete exercise tied to the story and the topic, with room to write."),
+    "main_game": ("Main game", "One complete exercise tied to the story and the topic: 3-8 items the child "
+                  "completes, laid out by the software with room to write. Answers go to the solutions page."),
     "coloring": ("Coloring page", "Black-and-white line-art scene from the story (not a repeat of a story picture) with a "
                  "one-line instruction, ideally using the topic (e.g. color the big castle red and the small one blue)."),
     "matching": ("Matching game", "Match related items (word and opposite, sum and answer, number and quantity) by drawing "
-                 "lines. Unambiguous: exactly one correct pairing."),
-    "fill_in": ("Complete the answer", "Short sentences, sums or challenges where the child writes or picks the answer."),
+                 "lines between two columns the software lays out and shuffles. Exactly one correct pairing."),
+    "fill_in": ("Complete the answer", "Short sentences, sums or challenges with a blank or a line to write the answer; "
+                "laid out by the software, answers on the solutions page."),
     "odd_one_out": ("Odd one out", "Several groups of words or numbers; the child finds the one that does not belong. "
-                    "Each group has exactly one clear answer, given in words (never depending on picture details)."),
+                    "Each group has exactly one clear answer, given in words (never depending on picture details). "
+                    "Laid out by the software as rows of tiles to circle."),
     "maze": ("Maze", "A maze drawn by the book software (always solvable). Write only a short instruction naming who must "
              "reach what, e.g. 'Help Nina reach her school!'. The picture shows the start character and the goal."),
     "observation": ("Observation", "A rich scene to search. Write only the title and instruction; the list of things to "
@@ -47,10 +50,11 @@ KINDS: dict[str, tuple[str, str]] = {
                        "space, clear instruction."),
     "imagination": ("Imagination", "The child invents a scene, character or object and describes it with the topic's "
                     "words; big blank space."),
-    "final_challenge": ("Final challenge", "A fun last challenge using everything learned, plus a small certificate with "
-                        "lines for the child's first name and the date."),
-    "solutions": ("Solutions", "Compact answers to every game with objectively checkable answers (not the comprehension "
-                  "questions, not drawing pages)."),
+    "final_challenge": ("Final challenge", "A fun last challenge using everything learned, plus a small certificate (drawn "
+                        "by the software) with lines for the child's first name and the date."),
+    "solutions": ("Solutions", "The software prints the answers of the maze, matching, fill-in, main game and odd "
+                  "one out from the games themselves; the page adds a short intro and answers to any other "
+                  "checkable game (not the comprehension questions, not drawing pages)."),
     "collection": ("In the same collection", "Only books named in the brief, with their topics; published vs coming soon "
                    "only as stated. Never invent titles, status or dates. End with an invitation to keep learning."),
     "copyright": ("Publishing details", "Collection, full title, author, copyright notice and year, edition. Never invent an "

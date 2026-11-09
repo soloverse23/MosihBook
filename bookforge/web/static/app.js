@@ -3,7 +3,7 @@ import { royalty, inkForPaper, isLarge, SYMBOL, MARKET, PRICING_SOURCE } from ".
 const view = document.getElementById("view");
 const STEPS = [
   ["brief", "Brief"], ["questions", "Questions"], ["outline", "Outline"], ["manuscript", "Manuscript"],
-  ["preview", "Preview"], ["art", "Art & build"], ["publish", "Publish"],
+  ["art", "Art & build"], ["publish", "Publish"],
 ];
 const TYPES = {
   picture_book: { label: "Picture book", icon: "image", trim: "8.5x8.5", paper: "premium_color", hint: "Ages 2–8 · art on every page" },
@@ -198,7 +198,7 @@ document.addEventListener("click", (e) => {
 
 function badge(status) {
   const map = { ready: "ok", "preflight failed": "err", "mock preview": "warn", manuscript: "accent" };
-  const label = { ready: "Ready to publish", "preflight failed": "Preflight failed", "mock preview": "Preview built",
+  const label = { ready: "Ready to publish", "preflight failed": "Preflight failed", "mock preview": "Placeholder build",
     manuscript: "Manuscript", draft: "Draft" }[status] || status;
   return `<span class="badge ${map[status] || ""}">${esc(label)}</span>`;
 }
@@ -625,7 +625,8 @@ async function briefForm(slug, brief = {}, sources = []) {
           <div class="field full" id="coll-field"><label for="s-coll">Other books in this collection</label>
             <textarea class="input" id="s-coll" name="structure.collection" rows="2" placeholder="Les aventures de Zigooli: verbs (published) · Nina va à l'école: adjectives (coming soon)">${esc(S.collection || "")}</textarea>
             <span class="hint">Only these appear on the collection page. Nothing is invented.</span></div></div>
-      </div>`, { optional: false })}
+      </div>
+      <div class="acts" id="acts"></div>`, { optional: false })}
     ${part(4, "b-voice", "Voice & look", "How it sounds and how it's drawn. Empty: Claude proposes.", `
       <div class="form-grid">
         <div class="field full"><span class="label">Tone <span class="faint">· pick one, or leave it to Claude</span></span>
@@ -776,6 +777,7 @@ function structureEditor(el, initial) {
     $("#coll-field", el).hidden = !secs.some((x) => x.kind === "collection" && x.enabled !== false);
     $("#tpl-total", el).textContent = on ? `${total()} interior pages, plus front and back cover. Hover a page for what Claude writes there.` : "";
     $("#sec-flow", el).innerHTML = bookFlow(secs, kinds);
+    drawActs();
     host.innerHTML = secs.map((x, i) => `
       <div class="secrow ${x.enabled === false ? "off" : ""}" data-i="${i}">
         <input type="checkbox" data-k="enabled" ${x.enabled === false ? "" : "checked"} aria-label="Include ${esc(kinds[x.kind]?.label || x.kind)}">
@@ -802,6 +804,31 @@ function structureEditor(el, initial) {
       $("[data-rm]", row).onclick = () => { secs.splice(i, 1); draw(); };
     });
     cards();
+  };
+  // the games & exercises a structure can have, what each page is, and who makes it
+  const drawActs = () => {
+    const box = $("#acts", el);
+    const on = !!secs.length;
+    const count = (k) => secs.filter((x) => x.kind === k && x.enabled !== false).reduce((n, x) => n + (Number(x.pages) || 0), 0);
+    box.innerHTML = `<div><h4>Games &amp; exercises you can add</h4>
+        <p class="faint xs">${on ? "Add any of these to this book. The answers to every game print on the solutions page automatically."
+          : "These come with a structure: pick one above (or describe one), then add games here. A free book gets games Claude invents."}</p></div>
+      <div class="act-grid">${ACTIVITIES.map(([k, desc, who]) => {
+        const n = count(k);
+        return `<div class="act ph-${PHASE_OF[k] || "play"} ${n ? "in" : ""}">${pageSketch(k)}
+          <div class="act-t"><b>${esc(kinds[k]?.label || k.replace(/_/g, " "))}</b>
+            <span class="xs">${esc(desc)}</span>
+            <span class="act-who ${who}">${ACT_WHO[who]}</span>
+            <span class="row between"><span class="faint xs">${n ? `${n} page${n > 1 ? "s" : ""} in this book` : ""}</span>
+              <button type="button" class="btn sm ghost" data-act="${k}" ${on ? "" : "disabled"}>+ Add</button></span></div></div>`;
+      }).join("")}</div>`;
+    $$("[data-act]", box).forEach((b) => (b.onclick = () => {
+      const at = secs.findIndex((x) => PHASE_OF[x.kind] === "end");  // games go before the closing pages
+      secs.splice(at < 0 ? secs.length : at, 0, { kind: b.dataset.act, pages: 1, enabled: true });
+      tplId = "_custom";
+      draw();
+      toast(`${kinds[b.dataset.act]?.label || b.dataset.act} added before the closing pages`);
+    }));
   };
   const choose = (id) => {
     tplId = id;
@@ -864,6 +891,21 @@ const PHASE_OF = {
   observation: "play", guided_drawing: "play", imagination: "play", final_challenge: "play",
   solutions: "end", collection: "end", copyright: "end", the_end: "end", about: "end",
 };
+// the brief's catalog of games & exercises: [kind, what the page is, who makes it]
+const ACTIVITIES = [
+  ["main_game", "The main exercise on the story's topic, with room to write.", "app"],
+  ["matching", "Two shuffled columns; the child draws a line between partners.", "app"],
+  ["fill_in", "Sentences or sums with a blank or a line for the answer.", "app"],
+  ["odd_one_out", "Rows of tiles; the child circles the one that doesn't belong.", "app"],
+  ["maze", "A maze that always has a way through, the hero at the start.", "app"],
+  ["final_challenge", "A last challenge and a certificate for the child's name and date.", "app"],
+  ["comprehension", "Ten questions about the story, answered out loud.", "text"],
+  ["coloring", "Black-and-white line art of a new scene to color.", "art"],
+  ["observation", "A busy picture with a list of things to find in it.", "art"],
+  ["guided_drawing", "An instruction and a big empty frame to draw in.", "blank"],
+  ["imagination", "The child invents and draws their own scene or character.", "blank"],
+];
+const ACT_WHO = { app: "Laid out by the app · answers always match", art: "Illustrated", blank: "Blank page to draw", text: "Text page" };
 const KIND_LABEL = { title: "Title page", dedication: "Dedication", copyright: "Copyright", the_end: "The End", about: "About the author" };
 
 // 30x40 page sketches: lines in ink, the part that makes the page what it is in accent
@@ -1090,8 +1132,11 @@ function templateEditor(card, t, kinds) {
 async function bookView(slug, step) {
   const b = await api("GET", `/api/books/${slug}`);
   const st = b.state;
-  const reached = Math.max(STEPS.findIndex(([k]) => k === st.step), b.yaml ? 3 : 0, b.last_build ? 4 : 0, b.last_build === "real" ? 6 : 0);
-  step ||= st.step || (b.yaml ? "manuscript" : "brief");
+  // "preview" was its own step before it merged into Art & build; old links and saved state land there
+  const saved = st.step === "preview" ? "art" : st.step;
+  if (step === "preview") step = "art";
+  const reached = Math.max(STEPS.findIndex(([k]) => k === saved), b.yaml ? 3 : 0, b.last_build ? 4 : 0, b.last_build === "real" ? 5 : 0);
+  step ||= saved || (b.yaml ? "manuscript" : "brief");
   const idx = STEPS.findIndex(([k]) => k === step);
   view.innerHTML = `<div class="page">
     <div class="crumb"><a href="#/">Library</a>/<span>${esc(b.title)}</span></div>
@@ -1115,12 +1160,12 @@ async function bookView(slug, step) {
     await api("DELETE", `/api/books/${slug}`); toast("Book deleted"); location.hash = "#/";
   };
   if (b.job) {
-    const where = b.job_kind === "mock" ? "preview" : "art";
+    const where = "art";
     if (step !== where) $("#step").insertAdjacentHTML("beforebegin", `<div class="job-banner">${note("info",
       `<span class="spin"></span> ${esc(JOB_LABELS[b.job_kind] || "A job")} is running in the background. <a href="#/book/${slug}/${where}">Watch progress</a>`)}</div>`);
   }
   const steps = { brief: stepBrief, questions: stepQuestions, outline: stepOutline, manuscript: stepManuscript,
-    preview: stepPreview, art: stepArt, publish: stepPublish };
+    art: stepArt, publish: stepPublish };
   await steps[step]($("#step"), b, slug);
 }
 
@@ -1270,8 +1315,8 @@ function stepManuscript(host, b, slug) {
           <textarea class="input" id="ins" rows="4" placeholder="Make page 5 funnier. Shorten the blurb…"></textarea>
           <button class="btn" id="rev">${icon("wand")}Apply with Claude</button></div></div>
         <div class="card"><div class="card-b stack">
-          <div><h3>Next: free preview</h3><p class="muted small">Lay out the whole book with placeholder art to check pacing and page count.</p></div>
-          <a class="btn primary" href="#/book/${slug}/preview">Preview the book${icon("arrow")}</a></div></div>
+          <div><h3>Next: art &amp; build</h3><p class="muted small">See every illustration and its cost, test the look with a pilot, then build the print files.</p></div>
+          <a class="btn primary" href="#/book/${slug}/art">Go to art${icon("arrow")}</a></div></div>
       </div></div>`;
   const setValid = (err) => {
     $("#err").innerHTML = err ? `<div style="margin-bottom:16px">${note("err", `<b>book.yaml has errors</b><pre>${esc(err)}</pre>`)}</div>` : "";
@@ -1367,43 +1412,7 @@ async function spreadViewer(el, slug) {
   }));
 }
 
-async function stepPreview(host, b, slug) {
-  const p = await loadPlan(slug);
-  if (p.error) { host.innerHTML = stepHead("Preview", "") + note("err", `${esc(p.error)}<br><a href="#/book/${slug}/manuscript">Fix the manuscript</a>`); return; }
-  const has = !!b.last_build;
-  host.innerHTML = stepHead("Free preview", "Placeholder art with real typesetting, real KDP geometry and preflight. Costs nothing.",
-    `<button class="btn primary" id="mock">${icon(has ? "refresh" : "play")}${has ? "Rebuild preview" : "Build preview"}</button>`) + `
-    <div class="stack">
-      <div class="stats">
-        <div class="stat"><div class="k">Pages</div><div class="v">${b.pages ?? "–"}</div><div class="s">${b.pages ? "incl. front matter" : "build to see"}</div></div>
-        <div class="stat"><div class="k">Illustrations</div><div class="v">${p.slots.length}</div><div class="s">incl. character sheets</div></div>
-        <div class="stat"><div class="k">Estimated art cost</div><div class="v" id="est">${money(p.estimate_usd)}</div><div class="s">each image generated once</div></div>
-      </div>
-      ${structureCard(p.structure, slug)}
-      ${jobPanel("Building preview…")}
-      <div id="viewer"></div>
-      ${lintHtml(p.lint)}
-      <div class="card"><div class="card-h"><div><h3>Illustrations</h3><p>All at <b>${esc(p.quality)}</b> (~${money(p.base_cost_usd)} each). Switch on <b>High</b> for images that deserve it (~${money(p.high_cost_usd)} each).</p></div>
-          <span class="faint small">${esc(p.model)}</span></div>
-        <div class="card-b table-wrap" id="slots">${slotTable(p)}</div>
-        <div class="card-f row between"><span class="faint small">Cached images are never paid for twice.</span>
-          <a class="btn primary sm" href="#/book/${slug}/art">Continue to art${icon("arrow")}</a></div></div>
-    </div>`;
-  if (has) spreadViewer($("#viewer"), slug);
-  wireSlotTable(slug);
-  const followMock = async (job) => {
-    const j = await watchJob(job, "Building preview…", p.slots.length);
-    if (j.status === "done") { await spreadViewer($("#viewer"), slug); toast(`Preview built: preflight ${j.result.preflight?.ok ? "passed" : "failed"}`); }
-    else toast("Preview failed. See the log.", true);
-  };
-  $("#mock").onclick = (e) => busy(e.currentTarget, "Building…", async () => {
-    const { job } = await api("POST", `/api/books/${slug}/jobs/mock`);
-    await followMock(job);
-  });
-  if (b.job && b.job_kind === "mock") { $("#mock").disabled = true; followMock(b.job).finally(() => ($("#mock").disabled = false)); }
-}
-
-// the preview's map of the book: intro, story, exercises, closing, in the order they print
+// map of the book: intro, story, exercises, closing, in the order they print
 function structureCard(structure, slug) {
   if (!structure?.length) return "";
   const play = structure.filter((x) => ["learn", "play"].includes(x.phase || PHASE_OF[x.kind]));
@@ -1421,12 +1430,13 @@ function slotTable(p) {
       <td class="r"><label class="switch"><input type="checkbox" data-high="${esc(s.id)}" ${s.quality === "high" ? "checked" : ""} aria-label="High quality for ${esc(s.id)}"><i></i></label></td></tr>`).join("")}</tbody></table>`;
 }
 
-function wireSlotTable(slug) {
+function wireSlotTable(slug, onChange) {
   $$("[data-high]").forEach((c) => (c.onchange = async () => {
     try {
       const p = await api("PUT", `/api/books/${slug}/high`, { slots: [c.dataset.high], on: c.checked });
-      $("#slots").innerHTML = slotTable(p); wireSlotTable(slug);
-      $("#est").textContent = money(p.estimate_usd);
+      $("#slots").innerHTML = slotTable(p); wireSlotTable(slug, onChange);
+      $$(".est").forEach((e) => (e.textContent = money(p.estimate_usd)));
+      onChange?.(p);
       toast(`${c.dataset.high} → ${c.checked ? "high" : p.quality} · book now ~${money(p.estimate_usd)}`);
     } catch (e) { c.checked = !c.checked; toast(e.message, true); }
   }));
@@ -1468,18 +1478,24 @@ async function characterCard(el, slug) {
 
 async function stepArt(host, b, slug) {
   const p = await loadPlan(slug);
-  if (p.error) { host.innerHTML = stepHead("Art & build", "") + note("err", esc(p.error)); return; }
+  if (p.error) { host.innerHTML = stepHead("Art & build", "") + note("err", `${esc(p.error)}<br><a href="#/book/${slug}/manuscript">Fix the manuscript</a>`); return; }
   let done = p.slots.filter((s) => s.has_art).length;
   const chars = p.slots.filter((s) => s.kind === "character").length;
+  const real = b.last_build === "real";
   host.innerHTML = stepHead("Art & build", "Try the look first, then illustrate everything and build the print files.") + `
     <div class="stack">
+      <div class="stats">
+        <div class="stat"><div class="k">Pages</div><div class="v">${real && b.pages ? b.pages : "–"}</div><div class="s">${real && b.pages ? "incl. front matter" : "known after the build"}</div></div>
+        <div class="stat"><div class="k">Illustrations</div><div class="v">${p.slots.length}</div><div class="s">incl. character sheets</div></div>
+        <div class="stat"><div class="k">Estimated art cost</div><div class="v est">${money(p.estimate_usd)}</div><div class="s">each image generated once</div></div>
+      </div>
       <div class="phases">
         <div class="phase"><span class="k">${icon("eye")}Step 1 · Pilot</span><h3>Test the look</h3>
           <p>Character sheets, the cover and the first few pages. Check them before you pay for everything.</p>
           <div class="row"><input class="input" id="pp" type="number" min="1" max="10" value="3" style="width:72px" aria-label="Pilot pages"><span class="muted small">pages</span>
             <button class="btn" id="pilot" style="margin-left:auto">Run pilot</button></div></div>
         <div class="phase"><span class="k">${icon("layers")}Step 2 · All art</span><h3 id="done">${done} of ${p.slots.length} images</h3>
-          <p>About <b>${money(p.estimate_usd)}</b> for everything. Each image is generated once and never redrawn unless you press Redo. Images you already have are free.</p>
+          <p>About <b class="est">${money(p.estimate_usd)}</b> for everything. Each image is generated once and never redrawn unless you press Redo. Images you already have are free.</p>
           <button class="btn primary" id="all">${icon("sparkle")}Generate all art</button></div>
         <div class="phase"><span class="k">${icon("file")}Step 3 · Build</span><h3>Print files</h3>
           <p>Lays out interior.pdf and cover.pdf with the real art and runs KDP preflight.</p>
@@ -1489,8 +1505,14 @@ async function stepArt(host, b, slug) {
       ${lintHtml(slug, p.lint)}
       ${jobPanel("Working…")}
       <div id="pf"></div>
+      <div id="viewer"></div>
       <div class="card" id="charcard" hidden></div>
       <div class="card" id="reviewcard" hidden></div>
+      ${structureCard(p.structure, slug)}
+      <div class="card"><div class="card-h"><div><h3>Illustrations</h3><p>All at <b>${esc(p.quality)}</b> (~${money(p.base_cost_usd)} each). Switch on <b>High</b> for images that deserve it (~${money(p.high_cost_usd)} each).</p></div>
+          <span class="faint small">${esc(p.model)}</span></div>
+        <div class="card-b table-wrap" id="slots">${slotTable(p)}</div>
+        <div class="card-f"><span class="faint small">Cached images are never paid for twice.</span></div></div>
     </div>`;
   const jobButtons = () => ["#pilot", "#all", "#build", "#pp"].map((q) => $(q)).filter(Boolean);
   const follow = async (job, kind, label, total) => {
@@ -1500,6 +1522,7 @@ async function stepArt(host, b, slug) {
       if (j.status !== "done") { toast("The job stopped. See the log.", true); }
       if (kind !== "build") { await characterCard($("#charcard"), slug); await reviewGrid($("#reviewcard"), slug, actions); await refreshDone(); }
       if (j.result?.preflight) showPreflight(j.result.preflight);
+      if (kind === "build" && j.status === "done") await spreadViewer($("#viewer"), slug);
       if (j.status === "done") toast(`${label.replace(/…$/, "")}: done`);
       return j;
     } finally {
@@ -1559,10 +1582,12 @@ async function stepArt(host, b, slug) {
   };
   $("#build").onclick = (e) => run(e.currentTarget, "build", {}, "Building print files…", 0);
   syncBuild();
+  wireSlotTable(slug, (np) => (p.slots = np.slots));
+  if (real) spreadViewer($("#viewer"), slug);
   characterCard($("#charcard"), slug);
   reviewGrid($("#reviewcard"), slug, actions);
   // a job still running on the server (e.g. after a page refresh): pick it up where it is
-  if (b.job && b.job_kind !== "mock") follow(b.job, b.job_kind, `${JOB_LABELS[b.job_kind] || "Working"}…`, 0);
+  if (b.job) follow(b.job, b.job_kind, `${JOB_LABELS[b.job_kind] || "Working"}…`, 0);
 }
 
 async function stepPublish(host, b, slug) {
@@ -1668,7 +1693,7 @@ function guide(anchor) {
       <nav class="toc" id="toc">${S.map(([id, t]) => `<a href="#/guide/${id}" data-s="${id}">${t}</a>`).join("")}</nav>
       <div>
         <section class="gsec" id="g-prepare"><h2>Before you upload</h2><p class="lead">Four checks that save you from a reprint.</p>${steps([
-          ["Preflight passes with real art", "Never upload a preview build. Art & build must show Preflight passed."],
+          ["Preflight passes with real art", "Never upload a build with placeholder art. Art & build must show Preflight passed."],
           ["Read every page", "Look in the spread viewer for typos, wrong character details, odd hands or faces, and text over busy art. Redo any image with a note."],
           ["Decide on the ISBN", "KDP's free ISBN works only on Amazon and lists “Independently published”. Buy your own (Bowker in the US, Nielsen in the UK) to use IngramSpark too or show your own imprint."],
           ["Have the listing ready", "Title, description, 7 keywords and categories. The Publish step drafts them with Claude."]])}</section>
@@ -1760,9 +1785,9 @@ async function settingsView() {
             <a class="btn primary sm" href="${esc(credit.buy_url)}" target="_blank" rel="noopener">${icon("dollar")}Buy credits${icon("ext")}</a></div>
           <div class="form-grid">
           ${field("openai_credit_usd", "Credit balance on OpenAI (USD)", { type: "number", step: "0.01", hint: `OpenAI doesn't share the balance with apps. Copy it from the <a href="${esc(credit.buy_url)}" target="_blank" rel="noopener">billing page</a> after buying; MosiBooks then subtracts each image it generates.`, full: true })}
-          ${field("openai_api_key", "OpenAI API key", { secret: true, ph: "sk-…", hint: "Required for real art. Previews are free without it.", full: true })}
+          ${field("openai_api_key", "OpenAI API key", { secret: true, ph: "sk-…", hint: "Required to generate the illustrations.", full: true })}
           ${field("image_model", "Image model")}
-          ${field("image_quality", "Default quality", { select: [["low", "low · ~$0.01"], ["medium", "medium · ~$0.05 (recommended)"], ["high", "high · ~$0.21"]], hint: "Per image. Mark single images as high in the Preview step." })}
+          ${field("image_quality", "Default quality", { select: [["low", "low · ~$0.01"], ["medium", "medium · ~$0.05 (recommended)"], ["high", "high · ~$0.21"]], hint: "Per image. Mark single images as high in the Art & build step." })}
           ${field("review", "Vision review", { select: [["true", "On · flags problems, never redraws"], ["false", "Off · cheapest"]] })}
           ${field("est_cost_per_image_usd", "Cost per image (USD)", { type: "number", step: "0.01", hint: "Only used for estimates." })}
           ${field("max_workers", "Parallel requests", { type: "number" })}
@@ -1910,7 +1935,7 @@ async function setupView(step) {
         <input class="input num" id="credit" type="number" step="0.01" min="0" value="${s.openai_credit_usd || ""}" placeholder="10">
         <span class="hint">MosiBooks keeps a running estimate of what's left, so you know before you run out.</span></div>
       ${result("r2")}
-      <div class="setup-actions"><a href="#" id="skip" class="small faint">Skip: I'll try free previews first</a>
+      <div class="setup-actions"><a href="#" id="skip" class="small faint">Skip for now</a>
         <div class="row"><a class="btn ghost" href="#/setup/1">Back</a><button class="btn" id="check">Check key</button><button class="btn primary" id="next" ${s.openai_api_key ? "" : "disabled"}>Continue</button></div></div>`);
     $("#okey").oninput = () => ($("#next").disabled = true);
     $("#check").onclick = () => busy($("#check"), "Checking", async () => {
@@ -1944,7 +1969,7 @@ async function setupView(step) {
     <div class="summary">
       <div>${icon(s.anthropic_api_key || st.claude.logged_in ? "check" : "alert")} Claude: ${s.anthropic_api_key ? "API key"
         : st.claude.logged_in ? `your Claude subscription (${esc(st.claude.email || "")})` : `not connected yet. <a href="#/setup/1">Connect</a>`}</div>
-      <div>${icon(s.openai_api_key ? "check" : "alert")} Illustrations: ${s.openai_api_key ? "OpenAI connected" : `not connected yet, free previews only. <a href="#/setup/2">Connect</a>`}</div>
+      <div>${icon(s.openai_api_key ? "check" : "alert")} Illustrations: ${s.openai_api_key ? "OpenAI connected" : `not connected yet, so no art can be generated. <a href="#/setup/2">Connect</a>`}</div>
     </div>
     <div class="setup-actions"><a class="btn ghost" href="#/setup/2">Back</a>
       <button class="btn primary" id="finish">${icon("sparkle")}Start my first book</button></div>`);

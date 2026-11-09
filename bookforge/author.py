@@ -71,8 +71,23 @@ Hard rules for book.yaml:
   - observation: `prompt` describes a rich scene; `text` is only the instruction ("Trouve dans l'image :");
     the list of things to find is made from the finished picture. Do not write one or its answers.
   - guided_drawing, imagination: `text` is the instruction; no `prompt` (the page is a big blank frame).
-  - solutions, copyright: no `prompt`. Solutions answer every game with objectively checkable answers (not
-    the comprehension questions, drawing pages, observation or the maze, which is added automatically).
+  - matching: `text` is the one-line instruction; set `matching: {{pairs: [[left, right], ...]}}` with 4-6
+    pairs written in their correct pairing (the software shuffles the right column). Every left item and every
+    right item different, so exactly one pairing is correct.
+  - fill_in and main_game: `text` is the instruction; set `fill_in: {{items: [{{prompt, answer}}, ...]}}` with
+    3-8 items. Put "___" in `prompt` where the child writes; an item without "___" gets a writing line under it.
+    Every `answer` is short and the only correct one.
+  - odd_one_out: `text` is the instruction; set `odd_one_out: {{groups: [{{items: [...], answer}}, ...]}}`, 3-5
+    groups of 4 words or numbers, `answer` being exactly one of that group's items, the only one that does not
+    belong, for a reason a child of the book's age can say.
+  - final_challenge: `text` is the challenge (short); set `certificate: {{title, name_label, date_label}}` in
+    the book's language (e.g. "Bravo !", "Prénom", "Date").
+  - On matching, fill_in, main_game and odd_one_out pages `prompt` is optional: a small vignette of a character
+    or object, never the game itself (the software lays the game out). On final_challenge: no `prompt`.
+  - solutions, copyright: no `prompt`. The software prints the answers of the maze, matching, fill_in,
+    main_game and odd_one_out pages itself: the solutions `text` is only a short line introducing them, plus
+    answers to any other game with objectively checkable answers (never the comprehension questions, drawing
+    pages or observation).
   Other kinds are illustrated pages as described in the structure.
 - trim must be one of: {trims}.
 - Fill `cover_prompt`, `back_cover.blurb` (2-4 enticing sentences), and `front_matter.dedication`.
@@ -337,6 +352,12 @@ async def revise(book_yaml: str, instruction: str) -> str:
     return await _validated(prompt, book_type, images)
 
 
+def activity_errors(data: dict) -> list[str]:
+    """Game pages of a template book that are missing the data the software lays them out from."""
+    return [f"page {i}: kind {pg.get('kind')!r} needs `{field}`" for i, pg in enumerate(data.get("pages") or [], 1)
+            if (field := spec.DATA_KINDS.get((pg or {}).get("kind") or "")) and not pg.get(field)][:8]
+
+
 def structure_errors(data: dict) -> list[str]:
     """Where a template book's pages differ from its structure (section kinds and page counts, in order)."""
     want = [s["kind"] for s in data.get("sections") or [] for _ in range(int(s.get("pages", 1)))]
@@ -363,6 +384,8 @@ async def _validated(prompt: str, book_type: str, image_block: dict, images=(), 
                 data["learning"] = {**(data.get("learning") or {}), **learning}
             if errs := structure_errors(data):
                 raise ValueError("the pages do not follow the book structure: " + "; ".join(errs))
+            if errs := activity_errors(data):
+                raise ValueError("game pages without their data: " + "; ".join(errs))
             spec.Book.model_validate(data)
             return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
         except (ValidationError, ValueError, yaml.YAMLError, TypeError, AttributeError) as e:

@@ -455,7 +455,7 @@ def start_job(slug: str, kind: str, body: dict = Body(default={})):
     if not (d / "book.yaml").exists():
         raise HTTPException(400, "write the manuscript first")
     if kind != "mock" and not settings.load().openai_api_key:
-        raise HTTPException(400, "add your OpenAI API key in Settings first (mock preview is free)")
+        raise HTTPException(400, "add your OpenAI API key in Settings first")
     try:
         job = jobs.start(slug, kind, slots=body.get("slots"), note=body.get("note"),
                          pilot_pages=int(body.get("pages", 3)), force=bool(body.get("force")))
