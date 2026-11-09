@@ -156,3 +156,73 @@ def replace_library_sheet(cid: str, data: bytes) -> None:
             im.convert("RGB").save(d / "sheet.png")
     except Exception as e:
         raise ValueError(f"not an image: {e}") from e
+
+
+PACK_MARKER = "bookforge-characters.json"  # identifies a character file made by export_pack
+_MAX_SHEET_BYTES = 30 * 1024 * 1024
+
+
+def export_pack(ids: list[str] | None = None) -> bytes:
+    """Library characters (all, or just `ids`) as one .zip to send to another studio: per character
+    its character.yaml and sheet.png, plus a marker listing who is inside."""
+    import io
+    import json
+    import zipfile
+
+    lib = library()
+    if ids is not None:
+        lib = [c for c in lib if c["id"] in set(ids)]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(PACK_MARKER, json.dumps({"characters": [c["name"] for c in lib]}, ensure_ascii=False, indent=1))
+        for c in lib:
+            d = library_dir() / c["id"]
+            z.write(d / "character.yaml", f"{c['id']}/character.yaml")
+            z.write(d / "sheet.png", f"{c['id']}/sheet.png")
+    return buf.getvalue()
+
+
+def import_pack(data: bytes) -> dict:
+    """Add the characters in an exported .zip to this library. A character with the same name is
+    replaced by the imported look. Returns {"added": [...], "replaced": [...]}. Raises ValueError."""
+    import io
+    import zipfile
+
+    from PIL import Image
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise ValueError("That isn't a character file (expected the .zip made by Export).") from e
+    names = set(z.namelist())
+    folders = sorted({n.split("/")[0] for n in names if n.endswith("/character.yaml") and n.count("/") == 1})
+    if not folders:
+        raise ValueError("No characters found in that file.")
+    added, replaced = [], []
+    for f in folders:
+        if f"{f}/sheet.png" not in names:
+            continue
+        try:
+            meta = yaml.safe_load(z.read(f"{f}/character.yaml"))
+            name = str(meta["name"]).strip()
+            if not name or z.getinfo(f"{f}/sheet.png").file_size > _MAX_SHEET_BYTES:
+                continue
+            with Image.open(io.BytesIO(z.read(f"{f}/sheet.png"))) as im:
+                im.load()
+                png = io.BytesIO()
+                im.convert("RGB").save(png, "PNG")
+        except Exception:
+            continue
+        keep = {k: meta[k] for k in ("name", "description", "source_book", "locked_at", "art_model", "style_hash")
+                if k in meta}
+        keep["name"] = name
+        keep["description"] = str(keep.get("description", "")).strip()
+        d = _entry(library_dir(), name)
+        if d.resolve().parent != library_dir().resolve():
+            continue  # a name that would escape the library folder
+        (replaced if _info(d) else added).append(name)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "sheet.png").write_bytes(png.getvalue())
+        (d / "character.yaml").write_text(yaml.safe_dump(keep, sort_keys=False, allow_unicode=True, width=100))
+    if not added and not replaced:
+        raise ValueError("None of the characters in that file could be read.")
+    return {"added": added, "replaced": replaced}

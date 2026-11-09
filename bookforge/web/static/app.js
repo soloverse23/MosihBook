@@ -31,6 +31,7 @@ const ICONS = {
   book: '<path d="M4 5.5c2.7-1 5.5-.8 8 .7v13c-2.5-1.5-5.3-1.7-8-.7zM20 5.5c-2.7-1-5.5-.8-8 .7v13c2.5-1.5 5.3-1.7 8-.7z"/>',
   grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="7" rx="1.5"/>',
   download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/>',
+  upload: '<path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M5 19.5h14"/>',
   file: '<path d="M7 3.5h7l4.5 4.5v12.5H7z"/><path d="M14 3.5V8h4.5"/>',
   copy: '<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5v-3a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 5.5V14A1.5 1.5 0 0 0 6 15.5h2.5"/>',
   more: '<circle cx="6" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="18" cy="12" r="1"/>',
@@ -469,7 +470,10 @@ async function characterLibrary() {
   const v = Date.now();
   view.innerHTML = `<div class="page">
     <div class="head"><div><h1>Characters</h1><p class="sub">Every character drawn for any of your books. A book that uses one of
-      these names starts from exactly this look, so a series stays consistent. Pick them in a new book's brief.</p></div></div>
+      these names starts from exactly this look, so a series stays consistent. Pick them in a new book's brief.</p></div>
+      <div class="row">
+        <label class="btn sm ghost"><input type="file" accept=".zip,application/zip" hidden id="charImport">${icon("upload")}Import</label>
+        ${chars.length ? `<a class="btn sm ghost" href="/api/characters/export.zip" download="characters.zip">${icon("download")}Export all</a>` : ""}</div></div>
     ${chars.length ? `<div class="card"><div class="card-b"><div class="review">${chars.map((c) => `
       <div class="shot"><div class="img"><img src="/api/characters/${encodeURIComponent(c.id)}.png?${v}" alt="${esc(c.name)}" loading="lazy"></div>
         <div class="m"><div class="row between"><span class="tag">${esc(c.name)}</span><span class="faint xs">${esc(c.locked_at || "")}</span></div>
@@ -480,6 +484,15 @@ async function characterLibrary() {
             <button class="btn sm ghost" data-del="${esc(c.id)}" data-name="${esc(c.name)}">${icon("trash")}Remove</button></div></div></div>`).join("")}</div></div></div>`
     : `<div class="card"><div class="empty"><div class="ico">${icon("users")}</div><h2>No characters yet</h2>
         <p>When a book's character sheets are drawn, each character is locked and saved here automatically.</p></div></div>`}</div>`;
+  $("#charImport").onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const res = await fetch("/api/characters/import", { method: "POST", body: f });
+    const r = await res.json();
+    if (!res.ok) { toast(r.detail || "Import failed", true); return; }
+    const n = r.added.length + r.replaced.length;
+    toast(`Imported ${n} character${n === 1 ? "" : "s"}${r.replaced.length ? ` (${r.replaced.length} replaced: ${r.replaced.join(", ")})` : ""}.`);
+    characterLibrary();
+  };
   $$("[data-up]").forEach((inp) => (inp.onchange = async () => {
     const f = inp.files[0]; if (!f) return;
     const res = await fetch(`/api/characters/${encodeURIComponent(inp.dataset.up)}/sheet`, { method: "POST", body: f });

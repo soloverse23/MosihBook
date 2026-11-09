@@ -384,6 +384,24 @@ def character_library():
     return {"characters": characters.library()}
 
 
+@app.get("/api/characters/export.zip")
+def export_characters(ids: str | None = None):
+    """The library (or the comma-separated `ids`) as one file to send to another studio."""
+    data = characters.export_pack(ids.split(",") if ids else None)
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="characters.zip"'})
+
+
+@app.post("/api/characters/import")
+async def import_characters(request: Request):
+    """Add the characters from an exported .zip. The body is the raw file bytes."""
+    try:
+        result = characters.import_pack(await request.body())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {**result, **character_library()}
+
+
 @app.get("/api/characters/{cid}.png")
 def library_sheet(cid: str):
     sheet = characters.library_sheet(cid)
