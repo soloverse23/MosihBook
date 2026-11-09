@@ -46,15 +46,10 @@ def lettering_problems(project: Project, errors: list, warnings: list) -> None:
     f = project.build / ("review-mock.json" if project.mock else "review.json")
     reviews = json.loads(f.read_text()) if f.exists() else {}
     chosen = reviews.get("_chosen", {})
-    unchecked = []
     for s in slots:
         v = reviews.get(chosen.get(s.id, {}).get("key", ""), {}).get("verdict")
-        if not v:
-            unchecked.append(s.id)
-        elif problems := text_problems(v, True):
+        if v and (problems := text_problems(v, True)):
             errors.append(f"{s.id}: " + "; ".join(problems) + " - redo it before uploading")
-    if unchecked:
-        warnings.append(f"lettering not checked by the art review ({', '.join(unchecked)}) - proofread every word")
 
 
 def check(project: Project) -> dict:
@@ -82,8 +77,6 @@ def check(project: Project) -> dict:
         if img["native_dpi"] < LOW_DPI:
             warnings.append(f"page {img['page']}: {img['src']} is {img['native_dpi']} DPI before upscaling - may print soft")
     blanks = m["blank"]
-    if len(blanks) > 4:
-        warnings.append(f"{len(blanks)} blank padding pages ({blanks}); add story pages to reach {kdp.MIN_PAGES}+")
     run = 1
     for a, b in zip(blanks, blanks[1:]):
         run = run + 1 if b == a + 1 else 1

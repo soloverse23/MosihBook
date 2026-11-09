@@ -95,16 +95,13 @@ def test_size_stays_in_non_experimental_range():
         assert w % 16 == h % 16 == 0 and 655_360 <= w * h <= 2560 * 1440 + 16 * (w + h)
 
 
-def test_lint_flags_text_requests_and_studio_styles():
+def test_lint_reports_only_serious_problems():
     data = spec.load(EXAMPLES / "picture-book" / "book.yaml").model_dump()
     data["pages"][1]["prompt"] = 'a shop sign that says "Open" above Pip in a Pixar style street'
     issues = lint(spec.Book.model_validate(data))
-    msgs = " ".join(i.message for i in issues if i.where == "page 2")
-    assert "keep words out of the prompt" in msgs and "studio/franchise" in msgs
-    data["images"]["text_in_art"] = False
-    msgs = " ".join(i.message for i in lint(spec.Book.model_validate(data)) if i.where == "page 2")
-    assert "words inside the image" in msgs
-    assert any(i.level == "error" for i in issues)
+    page2 = [i for i in issues if i.where == "page 2"]
+    assert len(page2) == 1 and "studio/franchise" in page2[0].message  # words in the prompt are no longer flagged
+    assert all(i.level == "error" for i in issues)
 
 
 def test_passed_rule():

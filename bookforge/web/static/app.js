@@ -179,6 +179,23 @@ function note(kind, html) {
   return `<div class="note ${kind}">${icon(ic)}<div class="body">${html}</div></div>`;
 }
 
+// warnings the user dismissed with "Ignore", remembered per book in this browser
+const ignoreStore = (slug) => `ignored:${slug}`;
+function ignoredSet(slug) {
+  try { return new Set(JSON.parse(localStorage.getItem(ignoreStore(slug)) || "[]")); } catch { return new Set(); }
+}
+const notIgnored = (slug, list, key = (x) => x) => { const s = ignoredSet(slug); return (list || []).filter((x) => !s.has(key(x))); };
+const ignoreBtn = (slug, key) => `<button class="btn sm ghost ignore" data-slug="${esc(slug)}" data-ignore="${esc(key)}">Ignore</button>`;
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-ignore]");
+  if (!b) return;
+  const s = ignoredSet(b.dataset.slug); s.add(b.dataset.ignore);
+  try { localStorage.setItem(ignoreStore(b.dataset.slug), JSON.stringify([...s])); } catch {}
+  const box = b.closest("[data-ignorable]");
+  b.closest("li")?.remove();
+  if (box && !box.querySelector("li")) box.remove();
+});
+
 function badge(status) {
   const map = { ready: "ok", "preflight failed": "err", "mock preview": "warn", manuscript: "accent" };
   const label = { ready: "Ready to publish", "preflight failed": "Preflight failed", "mock preview": "Preview built",
@@ -1286,10 +1303,10 @@ function stepManuscript(host, b, slug) {
   const showLint = async () => {
     const p = await loadPlan(slug);
     if (p.error) { $("#lint").innerHTML = ""; return; }
-    const issues = p.lint || [];
-    $("#lint").innerHTML = lintHtml(issues) + (issues.length ? `<div style="margin-top:8px"><button class="btn sm" id="fixlint">${icon("wand")}Fix these with Claude</button></div>` : "");
+    const issues = activeLint(slug, p.lint);
+    $("#lint").innerHTML = lintHtml(slug, issues, `<div style="margin-top:8px"><button class="btn sm" id="fixlint">${icon("wand")}Fix these with Claude</button></div>`);
     if (issues.length) $("#fixlint").onclick = (e) => busy(e.currentTarget, "Claude is fixing…", () => revise(
-      "Fix these prompt-check notes, changing only what each one needs:\n" + issues.map((i) => `- ${i.where}: ${i.message}`).join("\n")));
+      "Fix these prompt-check notes, changing only what each one needs:\n" + activeLint(slug, issues).map((i) => `- ${i.where}: ${i.message}`).join("\n")));
   };
   const wirePages = () => $$("[data-redopage]").forEach((btn) => (btn.onclick = async () => {
     const n = btn.dataset.redopage;
@@ -1317,11 +1334,15 @@ async function loadPlan(slug) {
   try { return await api("GET", `/api/books/${slug}/plan`); } catch (e) { return { error: e.message }; }
 }
 
-function lintHtml(issues) {
-  if (!issues?.length) return note("ok", "Prompt check passed. Every illustration prompt looks good.");
-  const err = issues.some((i) => i.level === "error");
-  return note(err ? "err" : "warn", `<b>Prompt check: ${issues.length} ${issues.length > 1 ? "notes" : "note"}</b><ul>${issues.map((i) =>
-    `<li><b>${esc(i.where)}</b> · ${esc(i.message)}</li>`).join("")}</ul>`);
+const lintKey = (i) => `lint|${i.where}|${i.message}`;
+const activeLint = (slug, issues) => notIgnored(slug, issues, lintKey);
+
+// only serious problems reach here; each one can be ignored, and nothing shows when all is well
+function lintHtml(slug, issues, extra = "") {
+  issues = activeLint(slug, issues);
+  if (!issues.length) return "";
+  return `<div data-ignorable>${note("err", `<b>Prompt check</b><ul>${issues.map((i) =>
+    `<li><b>${esc(i.where)}</b> · ${esc(i.message)} ${ignoreBtn(slug, lintKey(i))}</li>`).join("")}</ul>${extra}`)}</div>`;
 }
 
 async function spreadViewer(el, slug) {
@@ -1450,7 +1471,6 @@ async function stepArt(host, b, slug) {
   if (p.error) { host.innerHTML = stepHead("Art & build", "") + note("err", esc(p.error)); return; }
   let done = p.slots.filter((s) => s.has_art).length;
   const chars = p.slots.filter((s) => s.kind === "character").length;
-  const errors = p.lint.some((i) => i.level === "error");
   host.innerHTML = stepHead("Art & build", "Try the look first, then illustrate everything and build the print files.") + `
     <div class="stack">
       <div class="phases">
@@ -1466,8 +1486,7 @@ async function stepArt(host, b, slug) {
           <button class="btn" id="build" disabled>Build &amp; preflight</button>
           <p class="faint xs" id="build-hint"></p></div>
       </div>
-      ${lintHtml(p.lint)}
-      ${errors ? `<label class="check"><input type="checkbox" id="force"> Run anyway, ignoring prompt-check errors</label>` : ""}
+      ${lintHtml(slug, p.lint)}
       ${jobPanel("Working…")}
       <div id="pf"></div>
       <div class="card" id="charcard" hidden></div>
@@ -1488,14 +1507,14 @@ async function stepArt(host, b, slug) {
     }
   };
   const run = async (btn, kind, body, label, total) => busy(btn, label, async () => {
-    const { job } = await api("POST", `/api/books/${slug}/jobs/${kind}`, { ...body, force: $("#force")?.checked });
+    const { job } = await api("POST", `/api/books/${slug}/jobs/${kind}`, { ...body, force: !activeLint(slug, p.lint).length });
     return follow(job, kind, label, total);
   });
   const showPreflight = (r) => {
     $("#pf").innerHTML = `<div class="card"><div class="card-h"><h3>Preflight</h3>${r.ok ? `<span class="badge ok">Passed</span>` : `<span class="badge err">Failed</span>`}</div>
       <div class="card-b stack"><ul class="checklist">
         ${r.errors.map((e) => `<li class="e">${icon("x")}<span>${esc(e)}</span></li>`).join("")}
-        ${r.warnings.map((w) => `<li class="w">${icon("alert")}<span>${esc(w)}</span></li>`).join("")}
+        ${notIgnored(slug, r.warnings, (w) => `pf|${w}`).map((w) => `<li class="w">${icon("alert")}<span>${esc(w)}</span>${ignoreBtn(slug, `pf|${w}`)}</li>`).join("")}
         ${r.ok ? `<li class="o">${icon("check")}<span>${r.pages} pages · ${esc(r.trim)} · fonts embedded · bleed, margins and cover size match KDP</span></li>` : ""}</ul>
         ${r.ok ? `<div><a class="btn primary" href="#/book/${slug}/publish">Download &amp; publish${icon("arrow")}</a></div>` : ""}</div></div>`;
   };
@@ -1558,8 +1577,12 @@ async function stepPublish(host, b, slug) {
     <div class="stack">
       ${built ? note("ok", `Ready for KDP. In KDP choose <b>${esc(trim)}</b>, <b>${esc(PAPERS[paper] || paper)}</b> and <b>Bleed</b>.`)
         : note("warn", `${b.last_build === "mock" ? "These files use placeholder art. Don't upload them." : "Nothing built yet."} <a href="#/book/${slug}/art">Go to Art &amp; build</a>`)}
-      ${built && b.preflight && (b.preflight.errors.length || b.preflight.warnings.length) ? note(b.preflight.errors.length ? "err" : "warn",
-        `<b>Check before uploading</b><ul>${[...b.preflight.errors, ...b.preflight.warnings].map((w) => `<li>${esc(w)}</li>`).join("")}</ul>`) : ""}
+      ${(() => {
+        const pf = b.preflight, warns = built && pf ? notIgnored(slug, pf.warnings, (w) => `pf|${w}`) : [];
+        if (!built || !pf || !(pf.errors.length || warns.length)) return "";
+        return `<div data-ignorable>${note(pf.errors.length ? "err" : "warn", `<b>Check before uploading</b><ul>${pf.errors.map((e) => `<li>${esc(e)}</li>`).join("")}${
+          warns.map((w) => `<li>${esc(w)} ${ignoreBtn(slug, `pf|${w}`)}</li>`).join("")}</ul>`)}</div>`;
+      })()}
       <div class="files">
         ${file("interior.pdf", "interior.pdf", `${b.pages || "?"} pages`)}
         ${file("cover.pdf", "cover.pdf", "wraparound")}

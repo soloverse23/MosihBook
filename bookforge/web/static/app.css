@@ -733,3 +733,4 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 .update-notes { white-space: pre-line; max-height: 40vh; overflow: auto; padding: var(--s3); border-radius: var(--r);
   background: var(--sunk); font-size: .92em; }
 .modal h2 .spin { display: inline-block; vertical-align: -1px; margin-right: var(--s2); }
+.ignore { margin-left: 6px; height: 22px; padding: 0 8px; font-size: 12px; vertical-align: middle; } .checklist li .ignore { margin-left: auto; flex: none; }
