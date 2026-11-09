@@ -150,7 +150,7 @@ def pages_view(text: str | None) -> list[dict]:
     except (yaml.YAMLError, AttributeError):
         return []
     return [{"text": p.get("text", ""), "prompt": p.get("prompt") or "", "chapter": p.get("chapter") or "",
-             "layout": p.get("layout") or "", "panels": len(p.get("panels") or [])}
+             "layout": p.get("layout") or "", "panels": len(p.get("panels") or []), "kind": p.get("kind") or ""}
             for p in pages if isinstance(p, dict)]
 
 

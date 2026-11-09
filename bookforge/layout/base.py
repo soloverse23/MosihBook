@@ -179,6 +179,8 @@ class Sheet:
             c.setFont(self.theme.body, 9)
             c.setFillColor(HexColor(self.theme.ink))
             c.drawCentredString((sx + sw / 2) * inch, sy * inch, str(self.page_no))
+            self.records["text"].append({"page": self.page_no, "box": [round(v, 4) for v in (sx + sw / 2 - 0.2, sy, 0.4, 0.15)],
+                                         "safe": [round(v, 4) for v in interior.safe_box(self.page_no)], "folio": True})
             return
         r = 0.17
         cx = sx + sw - r if self.page_no % 2 else sx + r  # odd pages are right-hand pages

@@ -193,3 +193,32 @@ def structure_text(sections: list[dict | Section], back_cover: str | None = None
     if back_cover:
         lines.append(f"- back cover must include: {back_cover}")
     return f"Interior pages: {n - 1}.\n" + "\n".join(lines)
+
+
+def book_structure(book) -> list[dict]:
+    """The book's interior as runs of consecutive pages of one kind, in reading order, for the app's flow view.
+
+    A template book's pages carry their section kind. A free book gets its built-in front matter, the story,
+    and its closing pages. Each item: kind, title, pages (manuscript pages), and a phase only where the kind
+    alone doesn't say where it sits (a copyright page opens a free book but closes a template one)."""
+    from .plan import split_chapter
+    if not book.structured:
+        out = [{"kind": "title", "title": "Title page", "pages": 1},
+               {"kind": "copyright", "title": "Copyright", "pages": 1, "phase": "intro"}]
+        if book.front_matter.dedication:
+            out.append({"kind": "dedication", "title": "Dedication", "pages": 1})
+        out.append({"kind": "story", "title": KINDS["story"][0], "pages": len(book.pages)})
+        if book.type != "storybook" or (book.images.text_in_art and book.characters):
+            out.append({"kind": "the_end", "title": "The End", "pages": 1})
+        if book.about_author:
+            out.append({"kind": "about", "title": "About the author", "pages": 1})
+        return out
+    out: list[dict] = []
+    for p in book.pages:
+        kind = p.kind if p.kind in KINDS else "story"
+        if out and out[-1]["kind"] == kind:
+            out[-1]["pages"] += 1
+            continue
+        title = split_chapter(p.chapter)[1] if p.chapter and kind != "story" else ""
+        out.append({"kind": kind, "title": title or KINDS[kind][0], "pages": 1})
+    return out

@@ -221,6 +221,26 @@ def test_templates_api(client):
     assert client.delete("/api/templates/anahita-40").status_code == 404  # built-in, nothing saved
 
 
+def test_template_draft_from_prompt(client, monkeypatch):
+    seen = {}
+
+    async def ask(prompt, system, schema=None, images=()):
+        seen["prompt"] = prompt
+        return {"name": "Mini", "description": "Short.", "sections": [
+            {"kind": "parents_note", "pages": 1, "title": ""}, {"kind": "story", "pages": 99}, {"kind": "karaoke", "pages": 1}]}
+
+    monkeypatch.setattr(author, "ask", ask)
+    assert client.post("/api/templates/draft", json={"prompt": " "}).status_code == 422
+    r = client.post("/api/templates/draft", json={"prompt": "maze after the story",
+                                                  "current": {"name": "Old", "sections": [{"kind": "story", "pages": 10}]}}).json()
+    assert r["sections"] == [{"kind": "parents_note", "pages": 1}, {"kind": "story", "pages": 60}]  # unknown kind dropped, pages capped
+    assert "maze after the story" in seen["prompt"] and '"story"' in seen["prompt"]
+    # an edited built-in is saved as the writer's own copy under the same id, with its new name
+    t = client.post("/api/templates", json={"id": "anahita-40", "name": "Renamed", "sections": r["sections"]}).json()
+    got = next(x for x in client.get("/api/templates").json()["templates"] if x["id"] == "anahita-40")
+    assert got["name"] == "Renamed" and got["saved"] and t["pages"] == 61
+
+
 def test_job_reports_each_image_live(client):
     slug = client.post("/api/books", json={"idea": "a fox"}).json()["slug"]
     client.put(f"/api/books/{slug}/yaml", json={"yaml": EXAMPLE.read_text()})
@@ -235,3 +255,96 @@ def test_job_reports_each_image_live(client):
     assert j["status"] == "done" and pg["total"] > 0 and pg["done"] == pg["total"] and not pg["active"]
     first = pg["images"][0]["id"]
     assert client.get(f"/api/books/{slug}/build/thumbs/{first}.jpg").status_code == 200
+
+
+def test_claude_bin_finds_the_windows_binary(tmp_path, monkeypatch):
+    import shutil
+    import sys
+    import types
+
+    from bookforge.web import app as web_app
+    (tmp_path / "_bundled").mkdir()
+    (tmp_path / "_bundled" / "claude.exe").touch()
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", types.SimpleNamespace(__file__=str(tmp_path / "__init__.py")))
+    assert web_app._claude_bin() == str(tmp_path / "_bundled" / "claude.exe")
+
+
+def test_page_numbers_toggle_reaches_a_written_book(client):
+    import yaml
+    slug = client.post("/api/books", json={"idea": "a fox"}).json()["slug"]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": EXAMPLE.read_text()})
+    client.put(f"/api/books/{slug}/state", json={"brief": {"idea": "a fox", "page_numbers": False}})
+    assert yaml.safe_load(client.get(f"/api/books/{slug}").json()["yaml"])["page_numbers"] is False
+    client.put(f"/api/books/{slug}/state", json={"brief": {"idea": "a fox", "page_numbers": True}})
+    assert yaml.safe_load(client.get(f"/api/books/{slug}").json()["yaml"])["page_numbers"] is True
+
+
+@pytest.mark.parametrize("lettered", [False, True])
+def test_translate_keeps_the_art(client, monkeypatch, lettered):
+    import json
+    import shutil
+
+    import yaml
+
+    from bookforge import translate
+    data = yaml.safe_load(EXAMPLE.read_text())
+    data["images"]["text_in_art"] = lettered
+    slug = client.post("/api/books", json={"idea": "a fox"}).json()["slug"]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": yaml.safe_dump(data, allow_unicode=True)})
+    assert client.post(f"/api/books/{slug}/translate", json={"language": "French"}).status_code == 400  # no art yet
+    assert _wait(client, client.post(f"/api/books/{slug}/jobs/mock").json()["job"])["status"] == "done"
+    build = Path(settings.load().books_dir) / slug / "build"
+    shutil.copytree(build / "art-mock", build / "art")  # stand-in for the paid art
+    shutil.copy(build / "review-mock.json", build / "review.json")
+    shutil.copytree(build / "characters-mock", build.parent / "characters")
+
+    async def fake(texts, language, source, check):
+        out = {k: f"[FR] {v}" if "[[" not in v else v for k, v in texts.items()}
+        assert not check(texts, out)
+        return out
+    monkeypatch.setattr(author, "translate", fake)
+    r = client.post(f"/api/books/{slug}/translate", json={"language": "French"}).json()
+    new = Path(settings.load().books_dir) / r["slug"]
+    book = yaml.safe_load((new / "book.yaml").read_text())
+    assert book["language"] == "French" and book["title"].startswith("[FR]")
+    assert all(p["text"].startswith("[FR]") for p in book["pages"] if p.get("text") and "[[" not in p["text"])
+    assert {p.name for p in (new / "characters").iterdir()} == {p.name for p in (build.parent / "characters").iterdir()}
+    kept = sorted(p.stem for p in (new / "build" / "art").glob("*.png"))
+    assert kept == sorted(r["reused"]) and set(json.loads((new / "build" / "review.json").read_text())["_chosen"]) == set(kept)
+    if lettered:  # the words are in the pictures: those pages and the cover are drawn again
+        assert "cover-front" in r["redraw"] and any(s.startswith("p0") for s in r["redraw"]) and r["redraw_cost_usd"] > 0
+    else:  # nothing to draw: the translated book builds straight away from the same art
+        assert r["redraw"] == [] and r["reused"]
+        from bookforge.art import generate
+        from bookforge.project import Project
+
+        class NoSpend:
+            model = "x"
+            def request_size(self, aspect): return (1024, 1024)
+            def generate(self, *a): raise AssertionError("a reused image was drawn again")
+        monkeypatch.setattr(generate, "get_provider", lambda s: NoSpend())
+        monkeypatch.setattr(generate, "get_reviewer", lambda s: None)
+        assert generate.run(Project(new / "book.yaml"), log=lambda m: None) == {}  # nothing flagged "page changed"
+        j = _wait(client, client.post(f"/api/books/{r['slug']}/jobs/build").json()["job"])
+        assert j["status"] == "done", j["lines"]
+    assert translate.check({"a": "x [[y]]"}, {"a": "x y"})  # a lost highlight is caught
+
+
+def test_plan_shows_the_book_structure(client):
+    import yaml
+    slug = client.post("/api/books", json={"idea": "a fox"}).json()["slug"]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": EXAMPLE.read_text()})
+    kinds = [x["kind"] for x in client.get(f"/api/books/{slug}/plan").json()["structure"]]
+    assert kinds[0] == "title" and "story" in kinds
+
+    data = yaml.safe_load(EXAMPLE.read_text())
+    story = data["pages"][:3]
+    data["sections"] = [{"kind": "parents_note"}, {"kind": "story", "pages": 3}, {"kind": "coloring"}, {"kind": "maze"}]
+    data["pages"] = [{"kind": "parents_note", "text": "Dear parents"}] + [{**p, "kind": "story"} for p in story] + [
+        {"kind": "coloring", "chapter": "Color the fox", "text": "Color it", "prompt": "line art fox"},
+        {"kind": "maze", "text": "Help the fox home"}]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": yaml.safe_dump(data, allow_unicode=True)})
+    s = client.get(f"/api/books/{slug}/plan").json()["structure"]
+    assert [(x["kind"], x["pages"]) for x in s] == [("parents_note", 1), ("story", 3), ("coloring", 1), ("maze", 1)]
+    assert s[2]["title"] == "Color the fox"

@@ -36,7 +36,7 @@ build-backend = "setuptools.build_meta"
 include = ["bookforge*"]
 
 [tool.setuptools.package-data]
-bookforge = ["fonts/*.ttf", "web/static/*", "template_presets/*.yaml"]
+bookforge = ["fonts/*.ttf", "web/static/*", "web/static/styles/*", "template_presets/*.yaml"]
 
 [tool.vercel]
 entrypoint = "bookforge.web.app:app"

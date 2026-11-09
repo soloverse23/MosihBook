@@ -181,3 +181,14 @@ def test_page_numbers_can_be_switched_off(tmp_path):
     generate.run(p)
     m = build_interior(p)
     assert not [t for t in m["text"] if t.get("folio")]
+
+
+@pytest.mark.parametrize("example", ["picture-book", "comic"])
+def test_picture_books_and_comics_print_page_numbers(tmp_path, example):
+    shutil.copy(EXAMPLES / example / "book.yaml", tmp_path / "book.yaml")
+    p = Project(tmp_path / "book.yaml", mock=True)
+    generate.run(p)
+    on = {t["page"] for t in build_interior(p)["text"] if t.get("folio")}
+    assert len(on) >= len(p.book.pages)
+    p.book.page_numbers = False
+    assert not [t for t in build_interior(p)["text"] if t.get("folio")]

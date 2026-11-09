@@ -1,0 +1,10 @@
+[
+  {"id": "watercolor", "name": "Watercolor", "art": "Soft watercolor: loose transparent washes, gentle bleeding edges, visible paper texture, light pastel palette, airy and calm"},
+  {"id": "gouache", "name": "Gouache painting", "art": "Rich gouache painting: opaque matte colors, visible brush strokes, warm saturated palette, soft shapes, cozy storybook feel"},
+  {"id": "pencil", "name": "Colored pencil", "art": "Colored pencil and crayon: hand-drawn grainy strokes, soft shading, warm muted colors, cosy handmade texture on off-white paper"},
+  {"id": "flat", "name": "Flat vector", "art": "Modern flat vector illustration: clean geometric shapes, no outlines, bold limited palette, subtle grain texture, simple friendly characters"},
+  {"id": "3d", "name": "3D animated", "art": "Soft 3D animated-film look: rounded clay-like characters, big expressive eyes, warm cinematic lighting, smooth materials, gentle depth of field"},
+  {"id": "cartoon", "name": "Bold cartoon", "art": "Bold cartoon: thick clean black outlines, bright flat colors, exaggerated playful expressions, energetic comic-book feel"},
+  {"id": "collage", "name": "Paper collage", "art": "Cut-paper collage: layered torn and cut paper shapes, visible paper textures and edges, handmade crafty look, vivid colors"},
+  {"id": "ink", "name": "Ink & wash", "art": "Classic pen-and-ink with light watercolor wash: fine expressive linework, sparse soft color, lots of white space, timeless picture-book look"}
+]

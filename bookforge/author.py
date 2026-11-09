@@ -83,6 +83,7 @@ QUESTIONS_SCHEMA = {
     "properties": {"questions": {"type": "array", "items": {
         "type": "object",
         "properties": {"id": {"type": "string"}, "question": {"type": "string"},
+                       "why": {"type": "string", "description": "a few words on what the answer changes in the book"},
                        "options": {"type": "array", "items": {"type": "string"}}},
         "required": ["id", "question"]}}},
     "required": ["questions"],
@@ -290,7 +291,10 @@ async def questions(brief: dict, refs: str = "", images=()) -> list[dict]:
         f"A writer wants this book:\n{_brief_text(brief)}{_refs(refs)}\n\nAsk 3-6 short clarifying questions that would most "
         "change the story or the art (main character, what children should learn, emotional arc, setting, art style, "
         "ending, length...). "
-        "Skip anything the brief or the attachments already answer. If the brief has a learning point but no rule for "
+        "Ask only about what the brief and the attachments leave open: never re-ask something they already say, even in "
+        "other words, and never ask about the book structure, page count, trim or title when the brief sets them. "
+        "Each question covers one thing; put what the answer changes in the book in `why`. A question about the art "
+        "style must have the id `art_style` (the app shows it as a gallery of style pictures). If the brief has a learning point but no rule for "
         "marking it in the text, ask how to mark it (suggest options). Give 2-4 concrete suggested options per question.",
         _system(BOOK_TYPE), QUESTIONS_SCHEMA, images)
     return out["questions"]
@@ -379,6 +383,75 @@ async def listing(book_yaml: str, pages: int | None) -> dict:
         "and a one-sentence note on what to declare in KDP's AI-generated content question (images are AI-generated; "
         "say whether text is AI-generated or AI-assisted based on how it was written with you).",
         _system(yaml.safe_load(book_yaml).get("type", "picture_book")), LISTING_SCHEMA)
+
+
+TRANSLATION_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["items"],
+    "properties": {"items": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["id", "text"],
+        "properties": {"id": {"type": "string"}, "text": {"type": "string"}}}}},
+}
+
+
+async def translate(texts: dict[str, str], language: str, source_language: str, check) -> dict[str, str]:
+    """Translate a finished book's words. `check(original, translated)` lists problems; one retry fixes them."""
+    items = json.dumps([{"id": k, "text": v} for k, v in texts.items()], ensure_ascii=False, indent=1)
+    system = ("You are a children's book translator. You translate finished picture books so they read as if "
+              "they were written in the target language: natural, warm, rhythmic and age-appropriate, never stiff. "
+              "Keep each page about as long as the original, because the words must fit the same space on the page.")
+    prompt = (f"Translate this {source_language} children's book into {language}.\n\n"
+              "Rules:\n- Return every id exactly once, with its translated text.\n"
+              "- Keep line breaks, and keep each [[marked]] passage marked with [[ ]] around its translation "
+              "(the same number of marked passages per item).\n"
+              "- Character names: keep them, written the way readers of the target language would write them.\n"
+              "- Rhymes and wordplay: recreate the effect in the target language rather than translating literally.\n"
+              "- ids starting with finds. are short names of things to find in a picture; keep singular/plural "
+              "matching the number of things.\n"
+              "- learning.marking is the rule for how marked words are chosen: adapt it to the target language.\n\n"
+              f"Items:\n{items}")
+    for attempt in range(2):
+        out = await ask(prompt, system, TRANSLATION_SCHEMA)
+        got = {i["id"]: i["text"] for i in out["items"] if i["id"] in texts}
+        errs = check(texts, got)
+        if not errs:
+            return got
+        prompt += ("\n\nYour previous answer had these problems, fix them and return every item again:\n- "
+                   + "\n- ".join(errs[:20]))
+    raise AuthorError("Claude's translation was incomplete: " + "; ".join(errs[:6]))
+
+
+TEMPLATE_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["name", "description", "sections"],
+    "properties": {
+        "name": {"type": "string"}, "description": {"type": "string"},
+        "sections": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["kind", "pages"],
+            "properties": {"kind": {"type": "string", "enum": list(templates.KINDS)},
+                           "pages": {"type": "integer"}, "title": {"type": "string"}, "note": {"type": "string"}}}}},
+}
+
+
+async def template_draft(request: str, current: dict | None = None) -> dict:
+    """A book structure (name, description, ordered sections) from the writer's own words.
+    With `current`, the request changes that structure; without it, Claude starts from scratch."""
+    kinds = "\n".join(f"- {k}: {label}. {guide}" for k, (label, guide) in templates.KINDS.items())
+    base = ""
+    if current and current.get("sections"):
+        secs = [s for s in current["sections"] if s.get("enabled", True)]
+        base = ("Current structure (change only what the request asks; keep the rest as it is):\n"
+                f"name: {current.get('name') or ''}\n" + json.dumps(secs, ensure_ascii=False) + "\n\n")
+    prompt = (f"{base}The writer's request: {request}\n\n"
+              f"Section kinds you can use:\n{kinds}\n\n"
+              "Return the book structure in reading order: each section's kind, its number of interior pages (1-60), "
+              "and a title only when the page should not just use the kind's label. Use the custom kind with a note "
+              "for anything no kind covers. Keep the name short (2-5 words) and the description to one sentence. "
+              "Write the name, description and titles in the language the request is written in.")
+    out = await ask(prompt, "You design the structure of children's activity and picture books.", TEMPLATE_SCHEMA)
+    out["sections"] = [{k: v for k, v in s.items() if v not in ("", None)} | {"pages": max(0, min(60, int(s.get("pages") or 1)))}
+                       for s in out.get("sections", []) if s.get("kind") in templates.KINDS]
+    if not out["sections"]:
+        raise AuthorError("Claude didn't return any sections. Try saying it another way.")
+    return out
 
 
 async def ping() -> str:

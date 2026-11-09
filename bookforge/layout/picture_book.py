@@ -7,7 +7,7 @@ from .. import kdp
 from ..plan import needs_text_frame, picture_layout, text_space
 from ..project import Project
 from . import front_matter as fm
-from .base import Sheet, frame_box, para_html, text_band
+from .base import FOLIO_SPACE, Sheet, frame_box, para_html, text_band
 from .geometry import PICTURE_SPOT_ASPECT, SPLIT_IMAGE_FRACTION, fit_box
 
 Draw = Callable[[Sheet, kdp.Interior], None]
@@ -25,6 +25,16 @@ def sequence(project: Project) -> list[Draw]:
     if book.front_matter.dedication:
         pages.append(lambda s, i: fm.dedication_page(s, i, book))
 
+    def story(draw: Draw, on_art: bool) -> Draw:
+        """A story page, with its page number when the book prints them."""
+        if not book.page_numbers:
+            return draw
+
+        def numbered(s: Sheet, i: kdp.Interior) -> None:
+            draw(s, i)
+            s.folio(i, on_art=on_art)
+        return numbered
+
     for n, p in enumerate(book.pages, 1):
         layout = picture_layout(book, n - 1)
         src = art(f"p{n:03d}")
@@ -33,18 +43,21 @@ def sequence(project: Project) -> list[Draw]:
         if book.lettered(p):  # the words are in the art: the page is the picture
             html = ""
             if layout != "spread":
-                pages.append(lambda s, i, src=src: _full_bleed(s, i, src, "", space))
+                pages.append(story(lambda s, i, src=src: _full_bleed(s, i, src, "", space), True))
                 continue
         elif layout == "text_only" and frame:
-            pages.append(lambda s, i, html=html: _framed_text(s, i, frame, html))
+            pages.append(story(lambda s, i, html=html: _framed_text(s, i, frame, html), True))
             continue
         if layout == "spread":
             if len(pages) % 2 == 0:          # next page would be a recto; spreads start on a verso
                 pages.append(lambda s, i: fm.blank_page(s, i, book))
-            pages.append(lambda s, i, src=src, html=html, space=space: _spread_half(s, i, src, html, space, 0))
-            pages.append(lambda s, i, src=src: _spread_half(s, i, src, "", space, 1))
-        else:
-            pages.append(lambda s, i, f=_LAYOUTS[layout], src=src, html=html, space=space: f(s, i, src, html, space))
+            pages.append(story(lambda s, i, src=src, html=html, space=space: _spread_half(s, i, src, html, space, 0), True))
+            pages.append(story(lambda s, i, src=src: _spread_half(s, i, src, "", space, 1), True))
+        elif layout == "full_bleed":
+            pages.append(story(lambda s, i, src=src, html=html, space=space: _full_bleed(s, i, src, html, space), True))
+        else:  # text on paper: keep the bottom of the safe area clear for the centered page number
+            foot = FOLIO_SPACE if book.page_numbers else 0.0
+            pages.append(story(lambda s, i, f=_LAYOUTS[layout], src=src, html=html, foot=foot: f(s, i, src, html, foot), False))
 
     end_art = project.art_path("the-end") if book.images.text_in_art and book.characters else None
     closing = [lambda s, i: fm.the_end_page(s, i, book, end_art)]
@@ -60,28 +73,28 @@ def _full_bleed(sheet, interior, src, html, space):
     text_band(sheet, interior, html, space)
 
 
-def _split(sheet, interior, src, html, space):
+def _split(sheet, interior, src, html, foot=0.0):
     sheet.paper()
     ih = interior.page_h * SPLIT_IMAGE_FRACTION
     sheet.image(src, (0, interior.page_h - ih, interior.page_w, ih))
     x, y, w, h = safe = interior.safe_box(sheet.page_no)
     if html:
-        sheet.text(html, (x, y, w, interior.page_h - ih - y - 0.25), sheet.theme.size, safe=safe)
+        sheet.text(html, (x, y + foot, w, interior.page_h - ih - y - foot - 0.25), sheet.theme.size, safe=safe)
 
 
-def _spot(sheet, interior, src, html, space):
+def _spot(sheet, interior, src, html, foot=0.0):
     sheet.paper()
     x, y, w, h = safe = interior.safe_box(sheet.page_no)
     box = fit_box((x + w * 0.06, y + h * 0.36, w * 0.88, h * 0.64), PICTURE_SPOT_ASPECT)
     sheet.image(src, box)
     if html:
-        sheet.text(html, (x, y, w, box[1] - y - 0.2), sheet.theme.size, safe=safe)
+        sheet.text(html, (x, y + foot, w, box[1] - y - foot - 0.2), sheet.theme.size, safe=safe)
 
 
-def _text_only(sheet, interior, src, html, space):
+def _text_only(sheet, interior, src, html, foot=0.0):
     sheet.paper()
     x, y, w, h = safe = interior.safe_box(sheet.page_no)
-    sheet.text(html, (x + w * 0.08, y, w * 0.84, h), sheet.theme.size * 1.1, safe=safe)
+    sheet.text(html, (x + w * 0.08, y + foot, w * 0.84, h - foot), sheet.theme.size * 1.1, safe=safe)
 
 
 def _framed_text(sheet, interior, frame, html):
@@ -98,4 +111,4 @@ def _spread_half(sheet, interior, src, html, space, half):
     text_band(sheet, interior, html, space)
 
 
-_LAYOUTS = {"full_bleed": _full_bleed, "split": _split, "spot": _spot, "text_only": _text_only}
+_LAYOUTS = {"split": _split, "spot": _spot, "text_only": _text_only}  # text on paper; full bleed is handled above

@@ -25,10 +25,10 @@ def sequence(project: Project) -> list[Draw]:
     for n, p in enumerate(book.pages, 1):
         if p.panels:
             srcs = [project.art_path(f"p{n:03d}-{k}") for k in range(1, len(p.panels) + 1)]
-            pages.append(lambda s, i, p=p, srcs=srcs: _panel_page(s, i, p, srcs))
+            pages.append(lambda s, i, p=p, srcs=srcs: _panel_page(s, i, p, srcs, book.page_numbers))
         else:
             src = project.art_path(f"p{n:03d}")
-            pages.append(lambda s, i, p=p, src=src: _splash(s, i, p, src))
+            pages.append(lambda s, i, p=p, src=src: _splash(s, i, p, src, book.page_numbers))
     closing = [lambda s, i: fm.the_end_page(s, i, book)]
     if book.about_author:
         closing.append(lambda s, i: fm.about_page(s, i, book))
@@ -37,14 +37,16 @@ def sequence(project: Project) -> list[Draw]:
     return pages + closing
 
 
-def _splash(sheet: Sheet, interior: kdp.Interior, page, src) -> None:
+def _splash(sheet: Sheet, interior: kdp.Interior, page, src, numbered: bool = True) -> None:
     sheet.image(src, (0, 0, interior.page_w, interior.page_h))
     if page.text:
         x, y, w, h = safe = interior.safe_box(sheet.page_no)
         _caption(sheet, para_html(page.text), (x, y, w * 0.7, h * 0.25), "bottom", safe)
+    if numbered:
+        sheet.folio(interior, on_art=True)
 
 
-def _panel_page(sheet: Sheet, interior: kdp.Interior, page, srcs) -> None:
+def _panel_page(sheet: Sheet, interior: kdp.Interior, page, srcs, numbered: bool = True) -> None:
     sheet.fill("#FFFFFF")
     safe = interior.safe_box(sheet.page_no)
     x, y, w, h = safe
@@ -57,7 +59,8 @@ def _panel_page(sheet: Sheet, interior: kdp.Interior, page, srcs) -> None:
         c.setLineWidth(2.2)
         c.rect(bx * inch, by * inch, bw * inch, bh * inch, stroke=1, fill=0)
         _bubbles(sheet, panel.bubbles, box, safe)
-    sheet.folio(interior)
+    if numbered:
+        sheet.folio(interior)
 
 
 def _bubbles(sheet: Sheet, bubbles: list[Bubble], box: Box, safe: Box) -> None:

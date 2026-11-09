@@ -26,6 +26,7 @@ const ICONS = {
   alert: '<path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17.2v.1"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.1"/>',
   sparkle: '<path d="M12 3.5 13.8 10.2 20.5 12l-6.7 1.8L12 20.5l-1.8-6.7L3.5 12l6.7-1.8z"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5s1.2-6.1 3.5-8.5z"/>',
   image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/>',
   book: '<path d="M4 5.5c2.7-1 5.5-.8 8 .7v13c-2.5-1.5-5.3-1.7-8-.7zM20 5.5c-2.7-1-5.5-.8-8 .7v13c2.5-1.5 5.3-1.7 8-.7z"/>',
   grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="7" rx="1.5"/>',
@@ -408,17 +409,41 @@ async function library() {
       <div class="row gap3">${books.length ? `<div class="seg" id="filter">${[["all", "All"], ["progress", "In progress"], ["ready", "Ready"]].map(([k, l]) =>
         `<button data-f="${k}" class="${k === filter ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
         <a class="btn primary" href="#/new">${icon("plus")}New book</a></div></div>
-    ${books.length ? `<div class="books">${books.filter(show).map((b) => `
+    ${books.length ? `<div class="books">${books.filter(show).map((b) => `<div class="tile">${b.status === "ready"
+      ? `<button class="btn sm tile-act" data-tr="${b.slug}" data-title="${esc(b.title)}" title="Same pictures, translated text">${icon("globe")}Translate</button>` : ""}
       <a class="book" href="#/book/${b.slug}">
         <div class="cover">${b.cover ? `<img src="/api/books/${b.slug}/front.jpg?${b.updated}" alt="">` : coverPlaceholder(b.title, b.type)}</div>
         <div class="meta"><h3>${esc(b.title)}</h3>
           <div class="row between">${badge(b.status)}<span class="faint xs">${timeAgo(b.updated)}</span></div>
-          <span class="faint xs">${esc(TYPES[b.type]?.label || "")}${b.pages ? ` · ${b.pages} pages` : ""}</span></div></a>`).join("")}
+          <span class="faint xs">${esc(TYPES[b.type]?.label || "")}${b.pages ? ` · ${b.pages} pages` : ""}</span></div></a></div>`).join("")}
       <a class="newtile" href="#/new">${icon("plus")}New book</a></div>`
     : `<div class="card"><div class="empty"><div class="ico">${icon("sparkle")}</div><h2>Start your first book</h2>
         <p>Describe the book you want. Claude asks a few questions, outlines it and writes the manuscript, then MosiBooks illustrates and lays it out for print.</p>
         <a class="btn primary" href="#/new">${icon("plus")}New book</a></div></div>`}</div>`;
   $$("#filter button").forEach((b) => (b.onclick = () => { try { sessionStorage.setItem("lib-filter", b.dataset.f); } catch {} library(); }));
+  $$("[data-tr]").forEach((b) => (b.onclick = () => translateBook(b.dataset.tr, b.dataset.title, b)));
+}
+
+// A finished book in another language: Claude translates the words, the illustrations are reused.
+const LANGS = ["English", "French", "German", "Spanish", "Italian", "Portuguese", "Dutch", "Swedish", "Polish", "Romanian", "Turkish"];
+async function translateBook(slug, title, btn) {
+  const v = await modal({ title: `Translate “${title}”`, confirm: "Translate",
+    body: "Claude translates every page. Pictures without words in them are reused as they are, at no cost, and the new book is laid out straight away.",
+    fields: `<div class="field" style="margin-top:var(--s3)"><label for="tr-lang">Language</label>
+      <input class="input" id="tr-lang" name="language" list="tr-langs" required placeholder="French">
+      <datalist id="tr-langs">${LANGS.map((l) => `<option value="${l}">`).join("")}</datalist>
+      <span class="hint">The print fonts cover Latin script only, so Persian, Arabic and other scripts aren't supported yet.</span></div>` });
+  if (!v?.language?.trim()) return;
+  toast(`Claude is translating into ${v.language.trim()}. This takes about a minute.`);
+  const r = await busy(btn, "Translating…", () => api("POST", `/api/books/${slug}/translate`, { language: v.language.trim() }));
+  if (!r) return;
+  if (!r.redraw.length) {
+    await api("POST", `/api/books/${r.slug}/jobs/build`).catch((e) => toast(e.message, true));
+    toast(`Translated. All ${r.reused.length} pictures reused, laying out the book now.`);
+  } else {
+    toast(`Translated. ${r.reused.length} pictures reused. ${r.redraw.length} have the words drawn into them and need redrawing (about ${money(r.redraw_cost_usd)}).`);
+  }
+  location.hash = `#/book/${r.slug}/art`;
 }
 
 // ---------- character library ----------
@@ -465,44 +490,133 @@ async function uploadSource(slug, file) {
   return data;
 }
 
+// Popular art styles shown as pictures (the same scene in each), so a writer sees what they pick.
+// The chosen style's art direction goes into the field; "Other style" lets them describe their own.
+let artStyles;
+const loadArtStyles = () => (artStyles ||= fetch("/styles/styles.json").then((r) => r.json()).catch(() => []));
+const isArtQuestion = (q) => q.id === "art_style" || /\b(art|illustration|drawing) style\b/i.test(q.question || "");
+
+function stylePicker(styles, { name = "", id = "", value = "", label = "Art style" } = {}) {
+  const preset = styles.find((s) => s.art === value);
+  const other = !!value && !preset;
+  return `<div class="style-pick" role="radiogroup" aria-label="${esc(label)}">
+    <div class="style-grid">${styles.map((s) => `
+      <button type="button" class="style-card ${preset === s ? "on" : ""}" data-art="${esc(s.art)}" role="radio" aria-checked="${preset === s}" title="${esc(s.art)}">
+        <img src="/styles/${esc(s.id)}.jpg" alt="" loading="lazy"><span>${esc(s.name)}</span></button>`).join("")}
+      <button type="button" class="style-card other ${other ? "on" : ""}" data-other role="radio" aria-checked="${other}">
+        <span class="ph">${icon("edit")}</span><span>Other style</span></button></div>
+    <div class="style-other" ${other ? "" : "hidden"}><input class="input" ${id ? `id="${id}"` : ""} ${name ? `name="${name}"` : ""}
+      aria-label="${esc(label)}" value="${esc(value)}" placeholder="Describe the style: linocut prints, 1950s retro, pixel art…"></div>
+  </div>`;
+}
+
+function wireStylePicker(root) {
+  $$(".style-pick", root).forEach((p) => {
+    const input = $("input", p), box = $(".style-other", p), cards = $$(".style-card", p);
+    const select = (card) => cards.forEach((c) => { c.classList.toggle("on", c === card); c.setAttribute("aria-checked", c === card); });
+    cards.forEach((c) => (c.onclick = () => {
+      const off = c.classList.contains("on");
+      select(off ? null : c);
+      if (c.dataset.other !== undefined) {
+        box.hidden = off;
+        if (!off) { if (cards.some((x) => x.dataset.art === input.value)) input.value = ""; input.focus(); } else input.value = "";
+      } else { box.hidden = true; input.value = off ? "" : c.dataset.art; }  // click again: no style, Claude decides
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }));
+  });
+}
+
+// The brief, in five numbered parts. Only the idea is required; each optional part says what it is for and,
+// closed, what it holds now, so nothing is asked twice: Claude's questions cover only what is left open.
 async function briefForm(slug, brief = {}, sources = []) {
   const { settings: s, trims } = await getSettings();
   const type = "storybook";
+  const styles = await loadArtStyles();
+  const L = brief.learning || {}, W = brief.writing || {}, S = brief.structure || {};
+  const filled = (o) => Object.values(o || {}).some((v) => v && (!Array.isArray(v) || v.length));
+  const part = (n, id, title, why, body, { optional = true, open = true } = {}) => optional ? `
+    <details class="bsec" id="${id}" ${open ? "open" : ""}><summary><span class="bn">${n}</span><div class="bt"><h3>${title}</h3><p>${why}</p></div>
+      <span class="bstat" data-stat="${id}"></span>${icon("chevR", "chev")}</summary><div class="bbody">${body}</div></details>` : `
+    <section class="bsec" id="${id}"><div class="bhead"><span class="bn">${n}</span><div class="bt"><h3>${title}</h3><p>${why}</p></div></div><div class="bbody">${body}</div></section>`;
   const el = document.createElement("form");
-  el.className = "card";
+  el.className = "brief";
   el.innerHTML = `
-    <div class="card-b stack" style="gap:20px">
-      <input type="hidden" name="type" value="storybook"><input type="hidden" name="paper" value="premium_color">
+    <input type="hidden" name="type" value="storybook"><input type="hidden" name="paper" value="premium_color">
+    ${part(1, "b-story", "The story", "What happens, for whom. The only part you must fill in.", `
       <div class="field"><label for="idea">The idea</label>
-        <textarea class="input" id="idea" name="idea" rows="5" required placeholder="A shy hedgehog who is afraid of the dark learns the night is full of friends. Children practise the past tense…">${esc(brief.idea)}</textarea>
-        <span class="hint">A full-color illustrated book: the story, exercises and learning tips, and games at the end. Say what children should learn, plus premise, characters and setting.</span></div>
+        <textarea class="input" id="idea" name="idea" rows="5" required placeholder="A shy hedgehog who is afraid of the dark learns the night is full of friends.">${esc(brief.idea)}</textarea>
+        <span class="hint">Premise, main character, setting, how it ends if you know. The lesson goes in part 2.</span></div>
+      <div class="form-grid">
+        <div class="field"><label for="audience">Reader age</label><input class="input" id="audience" name="audience" value="${esc(brief.audience || "")}" placeholder="3–6"></div>
+        <div class="field"><label for="language">Language</label><input class="input" id="language" name="language" value="${esc(brief.language || "English")}"></div>
+      </div>
+      <div id="langwarn" hidden>${note("warn", "Words are lettered into the pictures by the image model, which only writes Latin script reliably. Persian, Arabic and other scripts aren't supported yet.")}</div>
+      <div class="field" id="cast-field" hidden><span class="label">Characters from your library <span class="faint">· optional</span></span>
+        <div class="cast" id="cast"></div>
+        <span class="hint">Ticked characters are written into the story with their exact look, for a series.</span></div>
       <div class="field"><span class="label">Reference files <span class="faint">· optional</span></span>
         <div class="attach" id="attach">
           <div class="attach-list" id="attach-list"></div>
           <label class="btn"><input type="file" id="attach-in" accept=".pdf,.txt,.md,.docx,.png,.jpg,.jpeg,.webp,.gif,image/*" multiple hidden>${icon("file")}Attach files</label></div>
-        <span class="hint">PDF, Word, text, Markdown or images: notes, a draft, research, a story to adapt, sketches or style references. Claude reads the text and looks at the images (attach scanned pages as images).</span></div>
-      <div class="field" id="cast-field" hidden><span class="label">Characters from your library <span class="faint">· optional</span></span>
-        <div class="cast" id="cast"></div>
-        <span class="hint">Ticked characters are written into the story with their exact look, for a series.</span></div>
+        <span class="hint">Notes, a draft, a story to adapt, sketches or style references (PDF, Word, text, Markdown, images).</span></div>`, { optional: false })}
+    ${part(2, "b-learn", "What it teaches", "The lesson the story carries, and how it shows on the page. Empty: Claude asks.", `
       <div class="form-grid">
-        <div class="field"><label for="audience">Reader age</label><input class="input" id="audience" name="audience" value="${esc(brief.audience || "")}" placeholder="3–6"></div>
+        <div class="field"><label for="l-topic">Topic</label>
+          <input class="input" id="l-topic" name="learning.topic" value="${esc(L.topic || "")}" placeholder="Adjectives and their opposites"></div>
+        <div class="field"><label for="l-targets">Target words or concepts</label>
+          <input class="input" id="l-targets" name="learning.targets" value="${esc(L.targets || "")}" placeholder="chaud/froid, grand/petit… (Claude picks if empty)"></div>
+        <div class="field full"><label for="l-explain">What the child should understand</label>
+          <textarea class="input" id="l-explain" name="learning.explain" rows="2" placeholder="An adjective describes a noun; many have an opposite.">${esc(L.explain || "")}</textarea></div>
+        <div class="field full"><label for="l-marking">How it's marked in the story</label>
+          <textarea class="input" id="l-marking" name="learning.marking" rows="2" placeholder="The adjective in violet, its opposite in parentheses right after it.">${esc(L.marking || "")}</textarea>
+          <span class="hint">Claude writes every story page by this rule; marked words print in the highlight style.</span></div>
+      </div>`, { open: filled(L) })}
+    ${part(3, "b-structure", "Pages & structure", "Which parts the book has, in what order: intro, story, exercises, closing.", `
+      <div class="tpl-cards" id="tpls" role="radiogroup" aria-label="Structure"></div>
+      <div class="te-ask" id="tpl-ask">
+        <label for="tpl-prompt"><b>${icon("sparkle")}<span id="tpl-ask-label">Or describe the structure you want</span></b></label>
+        <textarea class="input" id="tpl-prompt" rows="2"></textarea>
+        <div class="row between wrap gap3"><span class="faint xs">Claude builds the order for this book. You can still change it below and save it as a template.</span>
+          <button type="button" class="btn sm" id="tpl-go">${icon("sparkle")}Build with Claude</button></div></div>
+      <div class="field" id="len-field" style="max-width:360px"><label for="length">Length</label>
+        <input class="input" id="length" name="length" value="${esc(brief.length || "")}" placeholder="32 pages · 8 chapters">
+        <span class="hint">Claude plans the pages itself: no fixed exercise section.</span></div>
+      <div id="tpl-body" hidden>
+        <div class="row between wrap gap3"><span class="faint small" id="tpl-total"></span>
+          <span class="row"><button type="button" class="btn sm ghost" id="sec-edit">${icon("edit")}Customize sections</button>
+            <button type="button" class="btn sm ghost" id="tpl-save">${icon("copy")}Save as template</button></span></div>
+        <div id="sec-flow" class="sec-flow"></div>
+        <div id="sec-editor" class="stack" style="gap:10px" hidden>
+          <div id="secs" class="secs"></div>
+          <div class="row gap3 wrap"><select class="input" id="sec-add" name="_add" style="max-width:240px"><option value="">+ Add a section…</option></select></div></div>
+        <div class="form-grid">
+          <div class="field full"><label for="s-back">Back cover must include</label>
+            <input class="input" id="s-back" name="structure.back_cover" value="${esc(S.back_cover || "")}" placeholder="Summary, learning goal, age 6–9, the activities, barcode space"></div>
+          <div class="field full" id="coll-field"><label for="s-coll">Other books in this collection</label>
+            <textarea class="input" id="s-coll" name="structure.collection" rows="2" placeholder="Les aventures de Zigooli: verbs (published) · Nina va à l'école: adjectives (coming soon)">${esc(S.collection || "")}</textarea>
+            <span class="hint">Only these appear on the collection page. Nothing is invented.</span></div></div>
+      </div>`, { optional: false })}
+    ${part(4, "b-voice", "Voice & look", "How it sounds and how it's drawn. Empty: Claude proposes.", `
+      <div class="form-grid">
         <div class="field"><label for="tone">Tone</label><input class="input" id="tone" name="tone" value="${esc(brief.tone || "")}" placeholder="Gentle, funny, adventurous…"></div>
-        <div class="field"><label for="length">Length</label><input class="input" id="length" name="length" value="${esc(brief.length || "")}" placeholder="32 pages · 8 chapters"></div>
-        <div class="field"><label for="language">Language</label><input class="input" id="language" name="language" value="${esc(brief.language || "English")}"></div>
-        <div class="field full"><label for="art">Art style <span class="faint">· optional</span></label><input class="input" id="art" name="art" value="${esc(brief.art || "")}" placeholder="Soft watercolor, bold ink lines, retro print…"></div>
-      </div>
-      ${briefExtras(brief)}
-      <div id="langwarn" hidden>${note("warn", "Words are lettered into the pictures by the image model, which only writes Latin script reliably. Persian, Arabic and other scripts aren't supported yet.")}</div>
-      <hr style="margin:0">
+        <div class="field full"><span class="label">Art style <span class="faint">· pick one, or leave it to Claude</span></span>
+          ${stylePicker(styles, { name: "art", id: "art", value: brief.art || "" })}</div>
+        <div class="field"><label for="w-by">Writing inspired by</label>
+          <input class="input" id="w-by" name="writing.inspired_by" value="${esc(W.inspired_by || "")}" placeholder="An author whose style you like"></div>
+        <div class="field"><label for="w-notes">Style notes</label>
+          <input class="input" id="w-notes" name="writing.notes" value="${esc(W.notes || "")}" placeholder="Short rhyming lines, lots of dialogue"></div>
+        <div class="field full"><label for="w-sample">A sample of the style</label>
+          <textarea class="input" id="w-sample" name="writing.sample" rows="3" placeholder="Paste a passage. Claude takes the manner (rhythm, tone, humour), never the sentences.">${esc(W.sample || "")}</textarea></div>
+      </div>`, { open: filled(W) || !!(brief.tone || brief.art) })}
+    ${part(5, "b-print", "Cover & print", "Title and author on the cover, trim size, page numbers.", `
       <div class="form-grid">
-        <div class="field"><label for="title">Working title <span class="faint">· optional</span></label><input class="input" id="title" name="title" value="${esc(brief.title || "")}"></div>
+        <div class="field"><label for="title">Working title</label><input class="input" id="title" name="title" value="${esc(brief.title || "")}" placeholder="Claude proposes one if empty"></div>
         <div class="field"><label for="author">Author on the cover</label><input class="input" id="author" name="author" value="${esc(brief.author ?? s.default_author)}" placeholder="Your name"></div>
         <div class="field"><label for="trim">Trim size</label><select class="input" id="trim" name="trim">${trims.map((t) => `<option ${t === (brief.trim || TYPES[type].trim) ? "selected" : ""}>${t}</option>`).join("")}</select></div>
         <div class="field"><span class="label">Page numbers</span>
           <label class="check" style="height:36px"><input type="checkbox" name="page_numbers" ${brief.page_numbers === false ? "" : "checked"}> Print a number on every page</label></div>
-      </div>
-    </div>
-    <div class="card-f row between"><span class="faint small">Claude replies in about 10 seconds.</span>
+      </div>`, { open: false })}
+    <div class="brief-foot row between"><span class="faint small">Next, Claude asks only about what's still open. About 10 seconds.</span>
       <button class="btn primary" type="submit">${icon("sparkle")}${slug ? "Save and ask again" : "Continue"}</button></div>`;
   let saved = sources.slice(), pending = [];
   const list = $("#attach-list", el);
@@ -530,6 +644,7 @@ async function briefForm(slug, brief = {}, sources = []) {
   zone.ondrop = (e) => { e.preventDefault(); zone.classList.remove("over"); addFiles(e.dataTransfer.files); };
   drawFiles();
   voiceify(el);
+  wireStylePicker(el);
   const lang = () => ($("#langwarn", el).hidden = /^(english|en|)$|french|german|spanish|italian|dutch|portuguese/i.test(el.language.value.trim()));
   el.language.addEventListener("input", lang); lang();
   api("GET", "/api/characters").then(({ characters: lib }) => {
@@ -538,7 +653,20 @@ async function briefForm(slug, brief = {}, sources = []) {
     $("#cast", el).innerHTML = lib.map((c) => `<label class="castpick"><input type="checkbox" name="cast" value="${esc(c.name)}" ${(brief.cast || []).includes(c.name) ? "checked" : ""}>
       <img src="/api/characters/${encodeURIComponent(c.id)}.png" alt=""><span>${esc(c.name)}</span></label>`).join("");
   }).catch(() => {});
-  const structure = structureEditor(el, brief.structure || {});
+  const structure = structureEditor(el, S);
+  // what each closed optional part holds, so it reads at a glance without opening it
+  const val = (n) => (el.elements[n]?.value || "").trim();
+  const stats = {
+    "b-learn": () => val("learning.topic") || (val("learning.marking") ? "Marking rule set" : ""),
+    "b-voice": () => [val("tone"), styles.find((x) => x.art === val("art"))?.name || val("art"), val("writing.inspired_by") && `like ${val("writing.inspired_by")}`].filter(Boolean).join(" · "),
+    "b-print": () => [val("title") || "Title by Claude", val("trim"), el.page_numbers.checked ? "numbered" : "no numbers"].join(" · "),
+  };
+  const stat = () => Object.entries(stats).forEach(([id, f]) => {
+    const t = f();
+    $(`[data-stat="${id}"]`, el).innerHTML = id === "b-print" ? `<span class="faint">${esc(t)}</span>`
+      : t ? `<span class="set">${icon("check")}${esc(t)}</span>` : `<span class="faint">Not set</span>`;
+  });
+  el.addEventListener("input", stat); el.addEventListener("change", stat); stat();
   el.addEventListener("submit", (e) => {
     e.preventDefault();
     const data = {};
@@ -547,6 +675,7 @@ async function briefForm(slug, brief = {}, sources = []) {
       if (b) (data[a] ||= {})[b] = v; else if (!k.startsWith("_")) data[k] = v;
     }
     data.structure = { ...(data.structure || {}), ...structure.value() };
+    if (data.structure.sections.length) data.length = "";  // the template sets the length
     data.cast = $$("[name=cast]:checked", el).map((c) => c.value);
     data.page_numbers = el.page_numbers.checked;
     busy(el.querySelector("[type=submit]"), "Claude is reading…", async () => {
@@ -566,64 +695,63 @@ async function briefForm(slug, brief = {}, sources = []) {
   return el;
 }
 
-// ---------- learning point, writing style, book structure (all optional) ----------
-function briefExtras(brief) {
-  const L = brief.learning || {}, W = brief.writing || {}, S = brief.structure || {};
-  const filled = (o) => Object.values(o || {}).some((v) => v && (!Array.isArray(v) || v.length));
-  return `
-    <details class="more" ${filled(L) ? "open" : ""}><summary>${icon("sparkle")}Learning point <span class="faint">· optional</span></summary>
-      <div class="form-grid">
-        <div class="field"><label for="l-topic">What the book teaches</label>
-          <input class="input" id="l-topic" name="learning.topic" value="${esc(L.topic || "")}" placeholder="Adjectives and their opposites"></div>
-        <div class="field"><label for="l-targets">Target words or concepts</label>
-          <input class="input" id="l-targets" name="learning.targets" value="${esc(L.targets || "")}" placeholder="chaud/froid, grand/petit… (Claude picks if empty)"></div>
-        <div class="field full"><label for="l-explain">What the child should understand</label>
-          <textarea class="input" id="l-explain" name="learning.explain" rows="2" placeholder="An adjective describes a noun; many have an opposite.">${esc(L.explain || "")}</textarea></div>
-        <div class="field full"><label for="l-marking">How to mark it in the story</label>
-          <textarea class="input" id="l-marking" name="learning.marking" rows="2" placeholder="The adjective in violet, its opposite in parentheses right after it.">${esc(L.marking || "")}</textarea>
-          <span class="hint">Your rule, in your words. Claude writes every story page by it; the marked words are lettered or printed in the highlight style. Leave empty and Claude asks.</span></div>
-      </div></details>
-    <details class="more" ${filled(W) ? "open" : ""}><summary>${icon("edit")}Writing style <span class="faint">· optional</span></summary>
-      <div class="form-grid">
-        <div class="field"><label for="w-by">Inspired by</label>
-          <input class="input" id="w-by" name="writing.inspired_by" value="${esc(W.inspired_by || "")}" placeholder="An author whose style you like"></div>
-        <div class="field"><label for="w-notes">Style notes</label>
-          <input class="input" id="w-notes" name="writing.notes" value="${esc(W.notes || "")}" placeholder="Short rhyming lines, absurd humour, lots of dialogue"></div>
-        <div class="field full"><label for="w-sample">A sample of the style</label>
-          <textarea class="input" id="w-sample" name="writing.sample" rows="3" placeholder="Paste a passage. Claude takes the manner (rhythm, tone, humour), never the sentences.">${esc(W.sample || "")}</textarea></div>
-      </div></details>
-    <details class="more" id="structure" ${filled(S.sections) ? "open" : ""}><summary>${icon("layers")}Book structure <span class="faint">· optional</span></summary>
-      <div class="stack" style="gap:12px">
-        <div class="row gap3 wrap"><select class="input" id="tpl" name="_tpl" style="max-width:320px"><option value="">Free: Claude plans the pages</option></select>
-          <span class="faint small" id="tpl-total"></span></div>
-        <div id="secs" class="secs"></div>
-        <div class="row gap3 wrap" id="sec-tools" hidden><select class="input" id="sec-add" name="_add" style="max-width:240px"><option value="">+ Add a section…</option></select>
-          <button type="button" class="btn sm" id="tpl-save">${icon("copy")}Save as template</button></div>
-        <div class="form-grid" id="sec-extra" hidden>
-          <div class="field full"><label for="s-back">Back cover must include</label>
-            <input class="input" id="s-back" name="structure.back_cover" value="${esc(S.back_cover || "")}" placeholder="Summary, learning goal, age 6–9, the activities, barcode space"></div>
-          <div class="field full"><label for="s-coll">Other books in this collection</label>
-            <textarea class="input" id="s-coll" name="structure.collection" rows="2" placeholder="Les aventures de Zigooli: verbs (published) · Nina va à l'école: adjectives (coming soon)">${esc(S.collection || "")}</textarea>
-            <span class="hint">Only these appear on the collection page. Nothing is invented.</span></div></div>
-      </div></details>`;
+// pages per phase, in order: a thin bar that shows a template's shape at a glance
+function phaseBar(sections) {
+  const on = sections.filter((x) => x.enabled !== false && Number(x.pages) > 0);
+  const runs = [];
+  for (const x of on) {
+    const ph = x.phase || PHASE_OF[x.kind] || runs.at(-1)?.ph || "play";
+    if (runs.at(-1)?.ph === ph) runs.at(-1).n += Number(x.pages); else runs.push({ ph, n: Number(x.pages) });
+  }
+  return `<div class="pbar">${runs.map((r) => `<i class="ph-${r.ph}" style="flex:${r.n}" title="${PHASES[r.ph]}: ${r.n} ${r.n === 1 ? "page" : "pages"}"></i>`).join("")}</div>`;
 }
 
-// the section list of the brief's book structure: pick a template, then change it for this book only
+let kindsCache;
+const getKinds = async () => (kindsCache ??= (await api("GET", "/api/templates")).kinds);
+
+// part 3 of the brief: free, or a template, changed for this book only
 function structureEditor(el, initial) {
   let kinds = {}, tpls = [], secs = (initial.sections || []).map((x) => ({ ...x }));
-  let tplId = initial.template || "";
+  let tplId = initial.template || (secs.length ? "_custom" : "");
+  let draftName = "";
+  const askLabel = () => {
+    const on = !!secs.length;
+    $("#tpl-ask-label", el).textContent = on ? "Change this structure, or describe a new one" : "Or describe the structure you want";
+    $("#tpl-prompt", el).placeholder = on
+      ? "e.g. Put the coloring pages before the games, add a maze, and make the story 24 pages."
+      : "e.g. A note to parents, a 20-page story, 10 questions, then 2 coloring pages, a maze and a matching game. Solutions at the end.";
+  };
   const host = $("#secs", el);
   const total = () => secs.filter((x) => x.enabled !== false).reduce((n, x) => n + (Number(x.pages) || 0), 0);
+  const cards = () => {
+    const opts = [{ id: "", name: "Free", description: "Claude plans the pages. Story first; no fixed exercise section." }, ...tpls];
+    if (tplId === "_custom") opts.push({ id: "_custom", name: draftName || "This book's own", description: "Made for this book", sections: secs });
+    $("#tpls", el).innerHTML = opts.map((t) => {
+      const sel = t.id === tplId;
+      const ss = t.id === tplId && t.id ? secs : t.sections || [];
+      const n = ss.filter((x) => x.enabled !== false).reduce((a, x) => a + (Number(x.pages) || 0), 0);
+      return `<label class="tpl-card ${sel ? "on" : ""}"><input type="radio" name="_tpl" value="${esc(t.id)}" ${sel ? "checked" : ""}>
+        <span class="row between"><b>${esc(t.name)}</b><span class="faint xs">${t.id ? `${n} pages` : "any length"}</span></span>
+        ${t.id ? phaseBar(ss) : `<div class="pbar"><i class="ph-story" style="flex:1"></i></div>`}
+        <span class="faint xs">${esc(t.description || (t.audience ? `Ages ${t.audience}` : ""))}</span></label>`;
+    }).join("");
+    $$("[name=_tpl]", el).forEach((r) => (r.onchange = () => choose(r.value)));
+    askLabel();
+  };
   const draw = () => {
-    $("#sec-tools", el).hidden = $("#sec-extra", el).hidden = !secs.length;
-    $("#tpl-total", el).textContent = secs.length ? `${total()} interior pages · front and back cover separate` : "";
+    const on = !!secs.length;
+    $("#tpl-body", el).hidden = !on;
+    $("#len-field", el).hidden = on;
+    $("#coll-field", el).hidden = !secs.some((x) => x.kind === "collection" && x.enabled !== false);
+    $("#tpl-total", el).textContent = on ? `${total()} interior pages, plus front and back cover. Hover a page for what Claude writes there.` : "";
+    $("#sec-flow", el).innerHTML = bookFlow(secs, kinds);
     host.innerHTML = secs.map((x, i) => `
       <div class="secrow ${x.enabled === false ? "off" : ""}" data-i="${i}">
         <input type="checkbox" data-k="enabled" ${x.enabled === false ? "" : "checked"} aria-label="Include ${esc(kinds[x.kind]?.label || x.kind)}">
-        <span class="sk-label" title="${esc(kinds[x.kind]?.guide || "")}">${esc(kinds[x.kind]?.label || x.kind)}</span>
+        <span class="sk-label" title="${esc(kinds[x.kind]?.guide || "")}"><i class="dotph ph-${PHASE_OF[x.kind] || "play"}"></i>${esc(kinds[x.kind]?.label || x.kind)}</span>
         <input class="input" type="number" min="0" max="60" data-k="pages" value="${Number(x.pages) || 0}" aria-label="Pages">
-        <input class="input" data-k="title" value="${esc(x.title || "")}" placeholder="Title on the page (optional)">
-        <input class="input" data-k="note" value="${esc(x.note || "")}" placeholder="Note for Claude (optional)">
+        <input class="input" data-k="title" value="${esc(x.title || "")}" placeholder="Title on the page">
+        <input class="input" data-k="note" value="${esc(x.note || "")}" placeholder="Note for Claude">
         <span class="row"><button type="button" class="btn icon ghost" data-mv="-1" aria-label="Move up">↑</button>
           <button type="button" class="btn icon ghost" data-mv="1" aria-label="Move down">↓</button>
           <button type="button" class="btn icon ghost" data-rm aria-label="Remove">${icon("x")}</button></span></div>`).join("");
@@ -632,7 +760,8 @@ function structureEditor(el, initial) {
       $$("[data-k]", row).forEach((inp) => (inp.oninput = () => {
         const k = inp.dataset.k;
         secs[i][k] = k === "enabled" ? inp.checked : k === "pages" ? Number(inp.value) : inp.value;
-        if (k !== "title" && k !== "note") draw();
+        if (k !== "title" && k !== "note") { $("#sec-flow", el).innerHTML = bookFlow(secs, kinds); row.classList.toggle("off", secs[i].enabled === false);
+          $("#tpl-total", el).textContent = `${total()} interior pages, plus front and back cover.`; cards(); }
       }));
       $$("[data-mv]", row).forEach((b) => (b.onclick = () => {
         const j = i + Number(b.dataset.mv);
@@ -641,61 +770,289 @@ function structureEditor(el, initial) {
       }));
       $("[data-rm]", row).onclick = () => { secs.splice(i, 1); draw(); };
     });
+    cards();
   };
-  const pick = $("#tpl", el);
-  pick.onchange = () => {
-    tplId = pick.value;
-    const t = tpls.find((x) => x.id === tplId);
-    secs = t ? t.sections.map((x) => ({ ...x })) : [];
+  const choose = (id) => {
+    tplId = id;
+    const t = tpls.find((x) => x.id === id);
+    if (id !== "_custom") secs = t ? t.sections.map((x) => ({ ...x })) : [];
     if (t?.back_cover && !$("#s-back", el).value) $("#s-back", el).value = t.back_cover;
     if (t?.audience && el.audience && !el.audience.value) el.audience.value = t.audience;
     draw();
+  };
+  $("#sec-edit", el).onclick = (e) => {
+    const ed = $("#sec-editor", el);
+    ed.hidden = !ed.hidden;
+    e.currentTarget.innerHTML = ed.hidden ? `${icon("edit")}Customize sections` : `${icon("check")}Done`;
   };
   $("#sec-add", el).onchange = (e) => {
     if (!e.target.value) return;
     secs.push({ kind: e.target.value, pages: 1, enabled: true }); e.target.value = ""; draw();
   };
+  $("#tpl-go", el).onclick = (e) => {
+    const p = $("#tpl-prompt", el).value.trim();
+    if (!p) { $("#tpl-prompt", el).focus(); return toast("Write what structure you want first", true); }
+    busy(e.currentTarget, "Claude is arranging…", async () => {
+      const cur = tpls.find((x) => x.id === tplId);
+      const r = await api("POST", "/api/templates/draft", { prompt: p, current: secs.length ? { name: cur?.name || draftName, sections: secs } : null });
+      secs = r.sections.map((x) => ({ ...x, enabled: true }));
+      draftName = r.name || draftName;
+      tplId = "_custom";
+      $("#tpl-prompt", el).value = "";
+      draw();
+      $("#tpl-body", el).scrollIntoView({ block: "nearest", behavior: "smooth" });
+      toast(`Built “${draftName || "your structure"}” for this book. Save it as a template to reuse it.`);
+    });
+  };
   $("#tpl-save", el).onclick = async () => {
-    const name = prompt("Name of the template", tpls.find((x) => x.id === tplId)?.name || "");
+    const name = prompt("Name of the template", tpls.find((x) => x.id === tplId)?.name || draftName || "");
     if (!name) return;
     try {
       const t = await api("POST", "/api/templates", { name, sections: secs, back_cover: $("#s-back", el).value || undefined,
         audience: el.audience?.value || undefined });
-      tpls = [...tpls.filter((x) => x.id !== t.id), t]; tplId = t.id; fill(); toast(`Saved “${name}”. Every new book can start from it.`);
+      tpls = [...tpls.filter((x) => x.id !== t.id), t]; tplId = t.id; draw(); toast(`Saved “${name}”. Every new book can start from it.`);
     } catch (e) { toast(e.message, true); }
   };
-  const fill = () => {
-    pick.innerHTML = `<option value="">Free: Claude plans the pages</option>` +
-      tpls.map((t) => `<option value="${esc(t.id)}" ${t.id === tplId ? "selected" : ""}>${esc(t.name)} · ${t.pages} pages</option>`).join("");
-  };
   api("GET", "/api/templates").then((r) => {
-    kinds = r.kinds; tpls = r.templates; fill();
+    kinds = kindsCache = r.kinds; tpls = r.templates;
+    if (tplId && tplId !== "_custom" && !tpls.some((t) => t.id === tplId)) tplId = "_custom";
     $("#sec-add", el).innerHTML = `<option value="">+ Add a section…</option>` +
       Object.entries(kinds).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join("");
     draw();
   }).catch(() => {});
   draw();
-  return { value: () => (secs.length ? { template: tplId, sections: secs } : { template: "", sections: [] }) };
+  return { value: () => (secs.length ? { template: tplId === "_custom" ? "" : tplId, sections: secs } : { template: "", sections: [] }) };
+}
+
+// ---------- book flow: the order of a book's parts, with a small sketch of each kind of page ----------
+const PHASES = { intro: "Before the story", story: "The story", learn: "Learning pages", play: "Exercises & games", end: "Closing pages" };
+const PHASE_OF = {
+  title: "intro", dedication: "intro", parents_note: "intro", story: "story",
+  comprehension: "learn", theme_intro: "learn", reference: "learn",
+  main_game: "play", coloring: "play", matching: "play", fill_in: "play", odd_one_out: "play", maze: "play",
+  observation: "play", guided_drawing: "play", imagination: "play", final_challenge: "play",
+  solutions: "end", collection: "end", copyright: "end", the_end: "end", about: "end",
+};
+const KIND_LABEL = { title: "Title page", dedication: "Dedication", copyright: "Copyright", the_end: "The End", about: "About the author" };
+
+// 30x40 page sketches: lines in ink, the part that makes the page what it is in accent
+function pageSketch(kind) {
+  const L = (y, x1 = 6, x2 = 24) => `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}"/>`;
+  const lines = (y, n, gap = 3, x1 = 6, x2 = 24) => Array.from({ length: n }, (_, i) => L(y + i * gap, x1, i === n - 1 ? x2 - 5 : x2)).join("");
+  const head = `<line class="a" x1="9" y1="6" x2="21" y2="6" stroke-width="1.6"/>`;
+  const s = {
+    cover: `<rect class="af" x="0" y="0" width="30" height="40"/><line class="w" x1="8" y1="9" x2="22" y2="9" stroke-width="2"/><circle class="w" cx="15" cy="24" r="6"/>`,
+    title: `<circle class="a" cx="15" cy="15" r="6"/>${L(26, 9, 21)}${L(29, 11, 19)}`,
+    copyright: `<circle cx="15" cy="27" r="2.2"/>${lines(31, 2, 2.5, 8, 22)}`,
+    dedication: `<path class="a" d="M15 17.5c-3-2.4-4.5-3.8-4.5-5.4a2.2 2.2 0 0 1 4.5-.6 2.2 2.2 0 0 1 4.5.6c0 1.6-1.5 3-4.5 5.4z"/>${L(23, 9, 21)}`,
+    parents_note: `${head}${lines(11, 8)}`,
+    story: `<rect class="af" x="4" y="4" width="22" height="18" rx="1.5"/><path class="w" d="M4 19l6-6 5 5 3-3 8 7"/><circle class="w" cx="20" cy="9" r="2"/>${lines(27, 3)}`,
+    comprehension: `${head}${[0, 1, 2, 3, 4].map((i) => `<circle class="a" cx="7" cy="${12 + i * 5}" r="1.1"/>${L(12 + i * 5, 10, 24)}`).join("")}`,
+    theme_intro: `<circle class="a" cx="15" cy="11" r="4.5"/><line class="a" x1="13.5" y1="17" x2="16.5" y2="17"/>${lines(23, 4)}`,
+    reference: `${head}<rect x="5" y="11" width="20" height="22" rx="1"/>${L(16.5, 5, 25)}${L(22, 5, 25)}${L(27.5, 5, 25)}<line x1="15" y1="11" x2="15" y2="33"/>`,
+    main_game: `${head}${lines(12, 2)}<rect class="a" x="6" y="20" width="18" height="5" rx="1"/><rect class="a" x="6" y="28" width="18" height="5" rx="1"/>`,
+    coloring: `${head}<path class="a" d="M15 12l2.2 4.5 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5-3.6-3.5 5-.7z"/><path class="a" d="M7 35c3-4 6-4 8-1s5 3 8-1"/>`,
+    matching: `${head}${[0, 1, 2, 3].map((i) => `<circle class="af" cx="7" cy="${13 + i * 6}" r="1.4"/><circle class="af" cx="23" cy="${13 + i * 6}" r="1.4"/>`).join("")}<path class="a" d="M8.5 13L21.5 25M8.5 19L21.5 13M8.5 25L21.5 31M8.5 31L21.5 19"/>`,
+    fill_in: `${head}${[0, 1, 2, 3, 4].map((i) => `${L(13 + i * 5, 6, 14)}<line class="a" x1="16" y1="${13 + i * 5}" x2="24" y2="${13 + i * 5}" stroke-dasharray="1.5 1"/>`).join("")}`,
+    odd_one_out: `${head}${[0, 1, 2].map((r) => [0, 1, 2].map((c) => `<circle cx="${8 + c * 7}" cy="${14 + r * 8}" r="2.3"/>`).join("")).join("")}<circle class="a" cx="22" cy="14" r="3.4"/><circle class="a" cx="8" cy="22" r="3.4"/><circle class="a" cx="15" cy="30" r="3.4"/>`,
+    maze: `${head}<rect x="5" y="10" width="20" height="25"/><path d="M5 15h10M20 10v10M10 20h10v5M5 25h5M15 30h10M10 25v5"/><path class="a" d="M7.5 10v2.5h10v5h5v10h-5v5h5v5" stroke-dasharray="1.4 1"/>`,
+    observation: `${head}<rect x="5" y="10" width="20" height="20" rx="1"/><path d="M5 25l5-5 4 4 4-6 7 7"/><circle class="a" cx="18" cy="17" r="4"/><line class="a" x1="21" y1="20" x2="24.5" y2="23.5" stroke-width="1.6"/>`,
+    guided_drawing: `${head}${L(11, 8, 22)}<rect class="a" x="5" y="15" width="20" height="20" rx="3" stroke-dasharray="2 1.5"/><path d="M12 30l7-7 2 2-7 7h-2z"/>`,
+    imagination: `${head}${L(11, 8, 22)}<rect class="a" x="5" y="15" width="20" height="20" rx="3" stroke-dasharray="2 1.5"/><path class="a" d="M15 20.5l1.2 2.5 2.8.4-2 2 .5 2.7-2.5-1.3-2.5 1.3.5-2.7-2-2 2.8-.4z"/>`,
+    final_challenge: `${head}${lines(11, 2)}<rect class="a" x="5" y="18" width="20" height="16" rx="1.5"/><circle class="af" cx="15" cy="23.5" r="2.4"/>${L(29, 9, 21)}${L(31.5, 11, 19)}`,
+    solutions: `${head}${[0, 1, 2, 3, 4].map((i) => `<path class="a" d="M6 ${12.5 + i * 5}l1.3 1.3 2.4-2.6"/>${L(13 + i * 5, 12, 24)}`).join("")}`,
+    collection: `${head}${[0, 1, 2].map((i) => `<rect class="${i === 1 ? "af" : "a"}" x="${5 + i * 7}" y="13" width="5.5" height="8" rx=".6"/>`).join("")}${lines(26, 3)}`,
+    the_end: `<path class="a" d="M15 13l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z"/>${L(29, 10, 20)}`,
+    about: `<circle class="a" cx="15" cy="12" r="4"/><path class="a" d="M8.5 22c1.5-3 4-4 6.5-4s5 1 6.5 4"/>${lines(26, 3)}`,
+  };
+  return `<svg class="psk" viewBox="0 0 30 40" aria-hidden="true"><rect class="pg" x=".5" y=".5" width="29" height="39" rx="1.5"/>${s[kind] || `${head}${lines(11, 7)}`}</svg>`;
+}
+
+// sections: [{kind, pages, title?, phase?, enabled?}]. Consecutive sections of one phase share a box.
+function bookFlow(sections, kinds = {}, { covers = true, ranges = true } = {}) {
+  const on = sections.filter((x) => x.enabled !== false && Number(x.pages) > 0);
+  if (!on.length) return "";
+  const groups = [];
+  let n = 1;
+  for (const x of on) {
+    const ph = x.phase || PHASE_OF[x.kind] || groups.at(-1)?.phase || "play";
+    if (groups.at(-1)?.phase !== ph) groups.push({ phase: ph, items: [], from: n, pages: 0 });
+    const g = groups.at(-1);
+    g.items.push(x); g.pages += Number(x.pages); n += Number(x.pages);
+  }
+  const label = (x) => x.title || kinds[x.kind]?.label || KIND_LABEL[x.kind] || x.kind.replace(/_/g, " ");
+  const tile = (x) => `<div class="ftile ${x.pages > 1 ? "stack" : ""}" title="${esc(label(x))}${kinds[x.kind]?.guide ? ` · ${esc(kinds[x.kind].guide)}` : ""}">
+      ${pageSketch(x.kind)}${x.pages > 1 ? `<span class="fcount">×${x.pages}</span>` : ""}<span class="fname">${esc(label(x))}</span></div>`;
+  const cover = (t) => `<div class="fgroup cover"><div class="fhead"><b>${t}</b></div><div class="ftiles"><div class="ftile">${pageSketch("cover")}</div></div></div>`;
+  return `<div class="flow">${covers ? cover("Front cover") : ""}${groups.map((g) => `
+    <div class="fgroup ph-${g.phase}"><div class="fhead"><b>${PHASES[g.phase]}</b><span>${!ranges ? `${g.pages} ${g.pages === 1 ? "page" : "pages"}` : g.pages === 1 ? `p. ${g.from}` : `p. ${g.from}–${g.from + g.pages - 1}`}</span></div>
+      <div class="ftiles">${g.items.map(tile).join("")}</div></div>`).join("")}${covers ? cover("Back cover") : ""}</div>`;
 }
 
 // ---------- templates library ----------
-async function templateLibrary() {
+// the simple flow: one numbered step per section, in reading order, with its pages
+function simpleFlow(sections, kinds = {}) {
+  const on = sections.filter((x) => x.enabled !== false && Number(x.pages) > 0);
+  if (!on.length) return `<p class="faint small" style="margin:0">No sections yet.</p>`;
+  let n = 1;
+  const label = (x) => x.title || kinds[x.kind]?.label || KIND_LABEL[x.kind] || x.kind.replace(/_/g, " ");
+  const steps = on.map((x, i) => {
+    const p = Number(x.pages), rng = p === 1 ? `p. ${n}` : `p. ${n}–${n + p - 1}`;
+    n += p;
+    return `<li class="sf-step ph-${PHASE_OF[x.kind] || "play"}" title="${esc(kinds[x.kind]?.guide || "")}">
+      <span class="sf-n">${i + 1}</span>${pageSketch(x.kind)}
+      <span class="sf-t"><b>${esc(label(x))}</b><span>${rng}${p > 1 ? ` · ${p} pages` : ""}</span></span></li>`;
+  });
+  const used = [...new Set(on.map((x) => PHASE_OF[x.kind] || "play"))];
+  return `<div class="sf">${phaseBar(on)}
+    <div class="sf-legend">${used.map((ph) => `<span><i class="dotph ph-${ph}"></i>${PHASES[ph]}</span>`).join("")}</div>
+    <ol class="sf-steps">${steps.join("")}</ol></div>`;
+}
+
+async function templateLibrary(openId) {
   const { templates: list, kinds } = await api("GET", "/api/templates");
+  kindsCache = kinds;
   view.innerHTML = `<div class="page">
-    <div class="head"><div><h1>Templates</h1><p class="sub">Book structures: which sections a book has, in what order and how many pages each.
-      Pick one in a new book's brief and change it there for that book. Save a changed structure from the brief to add it here.</p></div></div>
-    <div class="stack">${list.map((t) => `
-      <div class="card"><div class="card-b stack" style="gap:8px">
-        <div class="row between"><div><h3 style="margin:0">${esc(t.name)}</h3><span class="faint xs">${t.pages} interior pages${t.audience ? ` · ages ${esc(t.audience)}` : ""}${t.builtin ? " · built in" : ""}</span></div>
-          ${t.builtin && !t.saved ? "" : `<button class="btn sm ghost" data-del="${esc(t.id)}" data-name="${esc(t.name)}">${icon("trash")}${t.builtin ? "Restore original" : "Remove"}</button>`}</div>
+    <div class="head"><div><h1>Templates</h1><p class="sub">The order of a book's parts and how many pages each gets.
+      Pick one in a new book's brief. Edit one here, or describe a new order and Claude builds it.</p></div>
+      <button class="btn primary" id="tpl-new">${icon("plus")}New template</button></div>
+    <div class="stack" id="tpl-list">${list.map((t) => `
+      <div class="card tpl-item" data-id="${esc(t.id)}"><div class="card-b stack" style="gap:12px">
+        <div class="row between"><div><h3 style="margin:0">${esc(t.name)}</h3>
+          <span class="faint xs">${t.pages} interior pages · ${t.sections.filter((x) => x.enabled !== false && x.pages > 0).length} parts${t.audience ? ` · ages ${esc(t.audience)}` : ""}${t.builtin ? (t.saved ? " · built in, edited" : " · built in") : ""}</span></div>
+          <span class="row"><button class="btn sm" data-edit>${icon("edit")}Edit</button>
+          ${t.builtin && !t.saved ? "" : `<button class="btn sm ghost" data-del>${icon("trash")}${t.builtin ? "Restore original" : "Remove"}</button>`}</span></div>
         ${t.description ? `<p class="muted small" style="margin:0">${esc(t.description)}</p>` : ""}
-        <div class="chips">${t.sections.filter((x) => x.enabled !== false).map((x) =>
-          `<span class="tag">${esc(x.title || kinds[x.kind]?.label || x.kind)} · ${x.pages}</span>`).join("")}</div></div></div>`).join("")}</div></div>`;
-  $$("[data-del]").forEach((b) => (b.onclick = async () => {
-    if (!(await modal({ title: `Remove ${b.dataset.name}?`, body: "Books already written keep their structure.", confirm: "Remove", danger: true }))) return;
-    try { await api("DELETE", `/api/templates/${encodeURIComponent(b.dataset.del)}`); toast("Removed"); } catch (e) { toast(e.message, true); }
-    templateLibrary();
-  }));
+        ${simpleFlow(t.sections, kinds)}</div></div>`).join("")}</div></div>`;
+  const byId = Object.fromEntries(list.map((t) => [t.id, t]));
+  $$(".tpl-item").forEach((card) => {
+    const t = byId[card.dataset.id];
+    $("[data-edit]", card).onclick = () => templateEditor(card, t, kinds);
+    const del = $("[data-del]", card);
+    if (del) del.onclick = async () => {
+      const restore = t.builtin;
+      if (!(await modal({ title: restore ? `Restore ${esc(t.name)}?` : `Remove ${esc(t.name)}?`,
+        body: restore ? "Your changes are dropped and the original comes back. Books already written keep their structure."
+          : "Books already written keep their structure.", confirm: restore ? "Restore" : "Remove", danger: !restore }))) return;
+      try { await api("DELETE", `/api/templates/${encodeURIComponent(t.id)}`); toast(restore ? "Restored" : "Removed"); } catch (e) { toast(e.message, true); }
+      templateLibrary();
+    };
+  });
+  $("#tpl-new").onclick = () => {
+    if ($("#tpl-list .tpl-item[data-id='']")) return;
+    const card = document.createElement("div");
+    card.className = "card tpl-item"; card.dataset.id = "";
+    $("#tpl-list").prepend(card);
+    templateEditor(card, null, kinds);
+  };
+  if (openId && byId[openId]) $(`.tpl-item[data-id="${CSS.escape(openId)}"]`)?.scrollIntoView({ block: "center" });
+}
+
+// edit a template in place: its name, its order (by hand or by asking Claude), then save
+function templateEditor(card, t, kinds) {
+  const isNew = !t;
+  const name = t?.name || "", desc = t?.description || "";
+  let secs = (t?.sections || []).map((x) => ({ ...x }));
+  const kindOpts = (sel) => Object.entries(kinds).map(([k, v]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${esc(v.label)}</option>`).join("");
+  card.classList.add("editing");
+  card.innerHTML = `<div class="card-b stack" style="gap:16px">
+    <div class="form-grid te-grid">
+      <div class="field"><label for="te-name">Name</label><input class="input" id="te-name" value="${esc(name)}" placeholder="e.g. Short activity book"></div>
+      <div class="field"><label for="te-desc">Description</label><input class="input" id="te-desc" value="${esc(desc)}" placeholder="One line on what this structure is for"></div></div>
+    <div class="te-ask">
+      <label for="te-prompt"><b>${icon("sparkle")}${isNew ? "Describe the order you want" : "Tell Claude what to change"}</b></label>
+      <textarea class="input" id="te-prompt" rows="2" placeholder="${isNew
+        ? "e.g. A note to parents, a 20-page story, 10 questions, then 2 coloring pages, a maze and a matching game. Solutions at the end."
+        : "e.g. Put the coloring pages before the games, add a maze, and make the story 24 pages."}"></textarea>
+      <div class="row between"><span class="faint xs">Claude rewrites the order below. Nothing is saved until you press Save.</span>
+        <button type="button" class="btn sm" id="te-go">${icon("sparkle")}${isNew ? "Build the order" : "Apply"}</button></div></div>
+    <div><div class="row between" style="margin-bottom:8px"><b class="small">Flow</b><span class="faint xs" id="te-total"></span></div>
+      <div id="te-flow"></div></div>
+    <details class="te-hand" ${isNew ? "" : "open"}><summary class="small"><b>Change by hand</b> <span class="faint">· drag to reorder</span></summary>
+      <div class="stack" style="gap:6px;margin-top:8px" id="te-rows"></div>
+      <select class="input" id="te-add" style="max-width:240px;margin-top:8px"><option value="">+ Add a part…</option>${kindOpts("")}</select></details></div>
+    <div class="card-f row between">
+      <span class="faint xs">${t?.builtin ? "Saving keeps your own copy. “Restore original” brings back the built-in one." : ""}</span>
+      <span class="row"><button type="button" class="btn ghost" id="te-cancel">Cancel</button>
+        ${isNew ? "" : `<button type="button" class="btn" id="te-copy">${icon("copy")}Save as new</button>`}
+        <button type="button" class="btn primary" id="te-save">${icon("check")}Save</button></span></div>`;
+  const total = () => secs.filter((x) => x.enabled !== false).reduce((n, x) => n + (Number(x.pages) || 0), 0);
+  const drawFlow = () => {
+    $("#te-flow", card).innerHTML = simpleFlow(secs, kinds);
+    $("#te-total", card).textContent = secs.length ? `${total()} interior pages, plus covers` : "";
+  };
+  let dragFrom = null;
+  const drawRows = () => {
+    $("#te-rows", card).innerHTML = secs.map((x, i) => `
+      <div class="te-row ${x.enabled === false ? "off" : ""}" draggable="true" data-i="${i}">
+        <span class="te-grip" aria-hidden="true">⋮⋮</span><span class="sf-n">${i + 1}</span>
+        <select class="input" data-k="kind" aria-label="Part">${kindOpts(x.kind)}</select>
+        <input class="input" type="number" min="0" max="60" data-k="pages" value="${Number(x.pages) || 0}" aria-label="Pages" title="Pages">
+        <input class="input" data-k="title" value="${esc(x.title || "")}" placeholder="Title on the page (optional)">
+        <span class="row"><button type="button" class="btn icon ghost" data-mv="-1" aria-label="Move up">↑</button>
+          <button type="button" class="btn icon ghost" data-mv="1" aria-label="Move down">↓</button>
+          <button type="button" class="btn icon ghost" data-rm aria-label="Remove">${icon("x")}</button></span></div>`).join("");
+    $$(".te-row", card).forEach((row) => {
+      const i = Number(row.dataset.i);
+      $$("[data-k]", row).forEach((inp) => (inp.oninput = () => {
+        const k = inp.dataset.k;
+        secs[i][k] = k === "pages" ? Number(inp.value) : inp.value;
+        drawFlow();
+      }));
+      $$("[data-mv]", row).forEach((b) => (b.onclick = () => move(i, i + Number(b.dataset.mv))));
+      $("[data-rm]", row).onclick = () => { secs.splice(i, 1); draw(); };
+      row.ondragstart = (e) => { dragFrom = i; row.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; };
+      row.ondragend = () => { dragFrom = null; row.classList.remove("dragging"); };
+      row.ondragover = (e) => { if (dragFrom !== null) { e.preventDefault(); row.classList.add("over"); } };
+      row.ondragleave = () => row.classList.remove("over");
+      row.ondrop = (e) => { e.preventDefault(); row.classList.remove("over"); if (dragFrom !== null) move(dragFrom, i); };
+    });
+  };
+  const move = (i, j) => {
+    if (i === j || j < 0 || j >= secs.length) return;
+    const [x] = secs.splice(i, 1); secs.splice(j, 0, x); draw();
+  };
+  const draw = () => { drawFlow(); drawRows(); };
+  $("#te-add", card).onchange = (e) => {
+    if (!e.target.value) return;
+    secs.push({ kind: e.target.value, pages: 1, enabled: true }); e.target.value = ""; draw();
+  };
+  $("#te-go", card).onclick = (e) => {
+    const prompt = $("#te-prompt", card).value.trim();
+    if (!prompt) { $("#te-prompt", card).focus(); return toast("Write what order you want first", true); }
+    busy(e.currentTarget, "Claude is arranging…", async () => {
+      const r = await api("POST", "/api/templates/draft", { prompt, current: secs.length ? { name: $("#te-name", card).value, sections: secs } : null });
+      secs = r.sections.map((x) => ({ ...x, enabled: true }));
+      if (!$("#te-name", card).value.trim()) $("#te-name", card).value = r.name || "";
+      if (!$("#te-desc", card).value.trim()) $("#te-desc", card).value = r.description || "";
+      $("#te-prompt", card).value = "";
+      draw(); toast("Order updated. Check it, then Save.");
+    });
+  };
+  const save = (asNew) => async (e) => {
+    const nm = $("#te-name", card).value.trim();
+    if (!nm) { $("#te-name", card).focus(); return toast("Give the template a name", true); }
+    if (!secs.some((x) => x.enabled !== false && Number(x.pages) > 0)) return toast("Add at least one part with pages", true);
+    if (asNew && t && nm === t.name) { $("#te-name", card).focus(); return toast("Give the copy a different name", true); }
+    await busy(e.currentTarget, "Saving…", async () => {
+      const body = { ...(t || {}), name: nm, description: $("#te-desc", card).value.trim(), sections: secs };
+      delete body.pages; delete body.builtin; delete body.saved;
+      if (asNew || isNew) delete body.id;
+      if (!body.id && list().includes(slugOf(nm))) throw new Error(`There is already a template called “${nm}”. Pick another name.`);
+      const r = await api("POST", "/api/templates", body);
+      toast(`Saved “${nm}”`);
+      templateLibrary(r.id);
+    });
+  };
+  const slugOf = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "template";
+  const list = () => $$(".tpl-item", document).map((c) => c.dataset.id).filter(Boolean);
+  $("#te-save", card).onclick = save(false);
+  if (!isNew) $("#te-copy", card).onclick = save(true);
+  $("#te-cancel", card).onclick = () => templateLibrary(t?.id);
+  voiceify(card);
+  draw();
+  (isNew ? $("#te-prompt", card) : $("#te-name", card)).focus();
+  card.scrollIntoView({ block: "nearest" });
 }
 
 // ---------- book wizard ----------
@@ -744,8 +1101,9 @@ async function stepBrief(host, b, slug) {
   host.append(await briefForm(slug, b.state.brief || {}, b.sources || []));
 }
 
-function stepQuestions(host, b, slug) {
+async function stepQuestions(host, b, slug) {
   const qs = b.state.questions;
+  const styles = qs?.some(isArtQuestion) ? await loadArtStyles() : [];
   if (!qs) {
     host.innerHTML = stepHead("Questions", "Claude asks what it needs to know before outlining.") +
       `<div class="card"><div class="empty"><div class="ico">${icon("sparkle")}</div><p>Claude hasn't asked its questions yet.</p>
@@ -754,12 +1112,14 @@ function stepQuestions(host, b, slug) {
     return;
   }
   const answers = b.state.answers || {};
-  host.innerHTML = stepHead("A few questions", "Pick a suggestion or write your own. Leave one blank and Claude decides.") + `
+  host.innerHTML = stepHead("A few questions", "Only what your brief leaves open. Pick a suggestion or write your own; leave one blank and Claude decides.") + `
+    ${briefRecap(b.state.brief || {}, slug)}
     <div class="card"><div class="card-b" id="qs">${qs.map((q, i) => `
       <div class="q" data-id="${esc(q.id)}"><span class="n">${i + 1}</span><div>
-        <div class="qt">${esc(q.question)}</div>
+        <div class="qt">${esc(q.question)}</div>${q.why ? `<div class="qwhy">${esc(q.why)}</div>` : ""}
+        ${styles.length && isArtQuestion(q) ? stylePicker(styles, { value: answers[q.id] || "", label: q.question }) : `
         ${q.options?.length ? `<div class="chips">${q.options.map((o) => `<button type="button" class="chip ${answers[q.id] === o ? "on" : ""}">${esc(o)}</button>`).join("")}</div>` : ""}
-        <input class="input" aria-label="${esc(q.question)}" value="${esc(answers[q.id] || "")}" placeholder="Your answer"></div></div>`).join("")}</div>
+        <input class="input" aria-label="${esc(q.question)}" value="${esc(answers[q.id] || "")}" placeholder="Your answer">`}</div></div>`).join("")}</div>
       <div class="card-f row between"><a class="btn ghost" href="#/book/${slug}/brief">${icon("edit")}Edit brief</a>
         <button class="btn primary" id="next">${icon("sparkle")}Write the outline</button></div></div>`;
   $$(".q").forEach((q) => {
@@ -768,6 +1128,7 @@ function stepQuestions(host, b, slug) {
     input.oninput = () => $$(".chip", q).forEach((x) => x.classList.toggle("on", x.textContent === input.value));
   });
   voiceify(host);
+  wireStylePicker(host);
   $("#next").onclick = (e) => busy(e.currentTarget, "Outlining… about 30 s", async () => {
     const ans = Object.fromEntries($$(".q").map((q) => [q.dataset.id, $("input", q).value.trim()]).filter(([, v]) => v));
     await api("POST", `/api/books/${slug}/claude/outline`, { answers: ans });
@@ -775,10 +1136,28 @@ function stepQuestions(host, b, slug) {
   });
 }
 
+// what the brief already settles, shown above Claude's questions so they read as the gaps, not a repeat
+function briefRecap(br, slug) {
+  const L = br.learning || {}, W = br.writing || {};
+  const secs = (br.structure?.sections || []).filter((x) => x.enabled !== false);
+  const n = secs.reduce((a, x) => a + (Number(x.pages) || 0), 0);
+  const items = [
+    ["Age", br.audience], ["Language", br.language],
+    ["Teaches", L.topic], ["Marking", L.marking && "set"],
+    ["Structure", secs.length ? `${n} pages, ${secs.length} sections` : br.length || "free"],
+    ["Tone", br.tone], ["Art", br.art], ["Style", W.inspired_by || W.notes],
+    ["Characters", (br.cast || []).join(", ")],
+  ].filter(([, v]) => v);
+  return `<div class="recap"><span class="faint xs">Claude already knows</span>${items.map(([k, v]) =>
+    `<span class="rk"><b>${k}</b> ${esc(v)}</span>`).join("")}<a class="xs" href="#/book/${slug}/brief">Edit brief</a></div>`;
+}
+
 function stepOutline(host, b, slug) {
   const outline = b.state.outline;
   if (!outline) { host.innerHTML = stepHead("Outline", "") + note("info", `Answer Claude's questions first. <a href="#/book/${slug}/questions">Go to questions</a>`); return; }
+  const secs = b.state.brief?.structure?.sections || [];
   host.innerHTML = stepHead("Outline", "The plan for the book. Approve it, ask for changes, or edit it yourself.") + `
+    ${secs.length ? `<div class="card" style="margin-bottom:var(--s5)"><div class="card-b"><div id="o-flow">${bookFlow(secs)}</div></div></div>` : ""}
     <div class="split">
       <div class="card"><div class="card-h"><h3>Outline</h3><div class="seg" id="mode"><button class="on" data-m="read">Read</button><button data-m="edit">Edit</button></div></div>
         <div class="card-b"><div class="doc" id="rendered">${md(outline)}</div>
@@ -798,6 +1177,7 @@ function stepOutline(host, b, slug) {
     if (!edit) $("#rendered").innerHTML = md($("#raw").value);
     $("#raw").hidden = !edit; $("#rendered").hidden = edit;
   }));
+  if (secs.length) getKinds().then((k) => ($("#o-flow").innerHTML = bookFlow(secs, k))).catch(() => {});
   voiceify(host);
   $("#revise").onclick = (e) => busy(e.currentTarget, "Revising…", async () => {
     const feedback = $("#fb").value.trim();
@@ -810,13 +1190,37 @@ function stepOutline(host, b, slug) {
   });
 }
 
-function pagesReader(pages) {
-  if (!pages?.length) return `<p class="muted">No pages to show. Check the YAML for errors.</p>`;
-  return pages.map((p, i) => `<div class="pg"><div class="no"><b>p${String(i + 1).padStart(2, "0")}</b>${p.layout ? `<span class="tag">${esc(p.layout.replace("_", " "))}</span>` : ""}
+function pageCard(p, i) {
+  const txt = esc(p.text).replace(/\[\[(.+?)\]\]/gs, '<mark class="hl">$1</mark>');
+  return `<div class="pg" id="pg-${i + 1}"><div class="no"><b>p${String(i + 1).padStart(2, "0")}</b>${p.layout ? `<span class="tag">${esc(p.layout.replace("_", " "))}</span>` : ""}
     <button class="btn sm ghost" data-redopage="${i + 1}" title="Tell Claude what to change on this page">${icon("refresh")}Redo</button></div><div>
     ${p.chapter ? `<div class="chapter">${esc(p.chapter)}</div>` : ""}
-    <div class="txt">${esc(p.text) || (p.panels ? `<span class="muted">${p.panels} comic panels</span>` : `<span class="faint">No text</span>`)}</div>
-    ${p.prompt ? `<div class="art">${icon("image")}<span>${esc(p.prompt)}</span></div>` : ""}</div></div>`).join("");
+    <div class="txt">${txt || (p.panels ? `<span class="muted">${p.panels} comic panels</span>` : `<span class="faint">No text</span>`)}</div>
+    ${p.prompt ? `<details class="art"><summary>${icon("image")}<span>${esc(p.prompt)}</span></summary><p>${esc(p.prompt)}</p></details>` : ""}</div></div>`;
+}
+
+// a template book reads section by section (parents' note, story, exercises...); a free book page by page
+function pagesReader(pages, kinds = kindsCache || {}) {
+  if (!pages?.length) return `<p class="muted">No pages to show. Check the YAML for errors.</p>`;
+  if (!pages.some((p) => p.kind)) return pages.map(pageCard).join("");
+  const runs = [];
+  pages.forEach((p, i) => {
+    const k = p.kind || "story";
+    if (runs.at(-1)?.kind === k) runs.at(-1).idx.push(i); else runs.push({ kind: k, idx: [i] });
+  });
+  const name = (k) => kinds[k]?.label || k.replace(/_/g, " ");
+  const nav = runs.map((r, j) => `<button type="button" class="ms-chip" data-sec="${j}"><i class="dotph ph-${PHASE_OF[r.kind] || "play"}"></i>${esc(name(r.kind))}${r.idx.length > 1 ? `<span>${r.idx.length}</span>` : ""}</button>`).join("");
+  return `<nav class="ms-map" aria-label="Sections">${nav}</nav>` + runs.map((r, j) => {
+    const ph = PHASE_OF[r.kind] || "play", a = r.idx[0] + 1, z = r.idx.at(-1) + 1;
+    return `<section class="ms-sec ph-${ph}" id="sec-${j}"><div class="ms-head">${pageSketch(r.kind)}<div><b>${esc(name(r.kind))}</b>
+        <span class="faint xs">${PHASES[ph]} · ${a === z ? `page ${a}` : `pages ${a}–${z}`}</span></div></div>
+      ${r.idx.map((i) => pageCard(pages[i], i)).join("")}</section>`;
+  }).join("");
+}
+
+// clicking a section in the map scrolls to it
+function wireReaderMap(root) {
+  $$(".ms-chip", root).forEach((t) => (t.onclick = () => $(`#sec-${t.dataset.sec}`, root)?.scrollIntoView({ behavior: "smooth", block: "start" })));
 }
 
 function stepManuscript(host, b, slug) {
@@ -850,7 +1254,7 @@ function stepManuscript(host, b, slug) {
   $("#save").onclick = (e) => busy(e.currentTarget, "Saving", async () => {
     try {
       const r = await api("PUT", `/api/books/${slug}/yaml`, { yaml: $("#yaml").value });
-      $("#reader").innerHTML = pagesReader(r.pages_view); setValid(null); wirePages(); showLint(); toast("Manuscript saved");
+      showPages(r.pages_view); setValid(null); showLint(); toast("Manuscript saved");
     } catch (err) {
       setValid(err.message);
       if (await modal({ title: "Save with errors?", body: "The YAML doesn't validate. You can save it anyway and keep fixing it, but the book won't build until it's valid.", confirm: "Save anyway" }))
@@ -859,7 +1263,7 @@ function stepManuscript(host, b, slug) {
   });
   const revise = async (instruction) => {
     const r = await api("POST", `/api/books/${slug}/claude/revise`, { instruction, yaml: $("#yaml").value });
-    $("#yaml").value = r.yaml; $("#reader").innerHTML = pagesReader(r.pages_view); setValid(null); wirePages();
+    $("#yaml").value = r.yaml; showPages(r.pages_view); setValid(null);
     showLint();
     toast("Manuscript updated");
   };
@@ -881,7 +1285,10 @@ function stepManuscript(host, b, slug) {
     if (!v?.fix?.trim()) return;
     busy(btn, "Redoing…", () => revise(`On page ${n} only: ${v.fix.trim()}. Leave every other page exactly as it is.`));
   }));
-  wirePages();
+  let shown = b.pages_view;
+  const showPages = (pv) => { shown = pv; $("#reader").innerHTML = pagesReader(pv); wireReaderMap($("#reader")); wirePages(); };
+  showPages(shown);
+  if (!kindsCache && shown.some((p) => p.kind)) getKinds().then(() => showPages(shown)).catch(() => {});
   showLint();
   voiceify(host);
   $("#rev").onclick = (e) => busy(e.currentTarget, "Claude is editing…", async () => {
@@ -936,6 +1343,7 @@ async function stepPreview(host, b, slug) {
         <div class="stat"><div class="k">Illustrations</div><div class="v">${p.slots.length}</div><div class="s">incl. character sheets</div></div>
         <div class="stat"><div class="k">Estimated art cost</div><div class="v" id="est">${money(p.estimate_usd)}</div><div class="s">each image generated once</div></div>
       </div>
+      ${structureCard(p.structure, slug)}
       ${jobPanel("Building preview…")}
       <div id="viewer"></div>
       ${lintHtml(p.lint)}
@@ -957,6 +1365,17 @@ async function stepPreview(host, b, slug) {
     await followMock(job);
   });
   if (b.job && b.job_kind === "mock") { $("#mock").disabled = true; followMock(b.job).finally(() => ($("#mock").disabled = false)); }
+}
+
+// the preview's map of the book: intro, story, exercises, closing, in the order they print
+function structureCard(structure, slug) {
+  if (!structure?.length) return "";
+  const play = structure.filter((x) => ["learn", "play"].includes(x.phase || PHASE_OF[x.kind]));
+  const n = play.reduce((a, x) => a + x.pages, 0);
+  return `<div class="card"><div class="card-h"><div><h3>Book structure</h3>
+      <p>${n ? `${n} exercise and learning ${n === 1 ? "page" : "pages"} after the story: ${esc(play.map((x) => x.title || x.kind).join(" · "))}.`
+        : `Story only. To add a parents' note, coloring pages, matching games or a maze, pick a template under Book structure in the <a href="#/book/${slug}/brief">brief</a>, then write the book again.`}</p></div></div>
+    <div class="card-b">${bookFlow(structure, {}, { ranges: false })}</div></div>`;
 }
 
 function slotTable(p) {
@@ -1135,7 +1554,10 @@ async function stepPublish(host, b, slug) {
         <button class="btn ${listing ? "" : "primary"} sm" id="gen">${icon("sparkle")}${listing ? "Regenerate" : "Draft with Claude"}</button></div>
         <div class="card-b" id="listing">${listing ? listingHtml(listing) : `<p class="muted">Claude reads the finished book and drafts every field KDP asks for.</p>`}</div></div>
       <div class="card"><div class="card-h"><h3>Royalty</h3><a class="small" href="#/guide/pricing">Pricing guide</a></div><div class="card-b" id="calc"></div></div>
+      ${built ? `<div class="card"><div class="card-h"><div><h3>Another language</h3><p>A copy of this book with the same pictures and translated text, ready to publish as its own edition.</p></div>
+        <button class="btn sm" id="tr">${icon("globe")}Translate</button></div></div>` : ""}
     </div>`;
+  if (built) $("#tr").onclick = (e) => translateBook(slug, b.title, e.currentTarget);
   calculator($("#calc"), { pages: b.pages || 32, paper, trim, price: listing?.suggested_price_usd });
   wireCopy();
   $("#gen").onclick = (e) => busy(e.currentTarget, "Writing…", async () => {
@@ -1504,3 +1926,48 @@ fetch("/api/auth/status").then((r) => r.json()).then((s) => {
   if (s.mode === "accounts" && s.user) { b.textContent = `Sign out · ${s.user}`; b.title = s.user; }
   b.onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login"; };
 }).catch(() => {});
+
+// ---------- updates (installed Windows app only: the server says whether it's enabled) ----------
+async function checkForUpdate() {
+  const done = sessionStorage.getItem("mb-updated-to");
+  let u;
+  try { u = await api("GET", "/api/update"); } catch { return; }
+  if (done) {
+    sessionStorage.removeItem("mb-updated-to");
+    if (u.current === done) toast(`MosiBooks is updated to version ${done}`);
+    else toast("The update didn't install. Your books are fine; try again later.", true);
+    return;
+  }
+  if (!u.enabled || !u.available || sessionStorage.getItem("mb-update-later") === u.latest) return;
+  const notes = (u.notes || "").trim();
+  const ok = await modal({ title: "A new version of MosiBooks is ready",
+    body: `Version ${esc(u.latest)} is available (you have ${esc(u.current)}). Updating takes a minute or two. Your books and settings stay as they are.`
+      + (notes ? `</p><p class="update-notes" dir="auto">${esc(notes)}` : ""),
+    confirm: "Update now" });
+  if (!ok) { sessionStorage.setItem("mb-update-later", u.latest); return; }
+  runUpdate(u.latest);
+}
+
+async function runUpdate(target) {
+  const root = document.getElementById("modal-root");
+  const show = (title, text, spin = true) => {
+    root.innerHTML = `<div class="backdrop"><div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="u-t" aria-live="polite">
+      <div class="mb"><h2 id="u-t">${spin ? '<span class="spin"></span> ' : ""}${esc(title)}</h2><p>${esc(text)}</p></div></div></div>`;
+  };
+  show("Downloading the update", "Keep this page open. MosiBooks will restart by itself.");
+  try {
+    await api("POST", "/api/update/apply");
+  } catch (e) { root.innerHTML = ""; toast(e.message, true); return; }
+  sessionStorage.setItem("mb-updated-to", target);
+  show("Installing the update", "MosiBooks is closing, installing the new version and starting again. This page reloads by itself.");
+  const alive = () => fetch("/api/auth/status", { cache: "no-store" }).then((r) => r.ok, () => false);
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const t0 = Date.now();
+  while (await alive() && Date.now() - t0 < 30000) await wait(1000);   // until the old app has stopped
+  while (Date.now() - t0 < 15 * 60000) {
+    await wait(2000);
+    if (await alive()) { location.reload(); return; }
+  }
+  show("The update is taking too long", "Close this page, then open MosiBooks from the desktop icon.", false);
+}
+checkForUpdate();

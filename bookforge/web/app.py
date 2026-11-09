@@ -10,14 +10,14 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import author, characters, kdp, settings, templates
+from .. import author, characters, kdp, settings, spec, templates
 from ..art.lint import lint
 from ..art.generate import text_problems
 from ..art.review import passed
 from ..plan import plan
 from ..spec import QUALITY_COST_USD
 from ..project import Project
-from . import auth, jobs, state
+from . import auth, jobs, state, updater
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="MosiBooks")
@@ -86,8 +86,8 @@ def _claude_bin() -> str | None:
         return found
     try:
         import claude_agent_sdk
-        b = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-        return str(b) if b.exists() else None
+        bundled = Path(claude_agent_sdk.__file__).parent / "_bundled"
+        return next((str(bundled / n) for n in ("claude", "claude.exe") if (bundled / n).exists()), None)
     except ImportError:
         return None
 
@@ -140,6 +140,25 @@ def setup_done():
     return {"ok": True}
 
 
+# ---- self-update (Windows install) ----------------------------------------------------------
+
+@app.get("/api/update")
+def update_status(force: bool = False):
+    return updater.public(updater.check(force))
+
+
+@app.post("/api/update/apply")
+def update_apply():
+    if any(j.status == "running" for j in jobs.JOBS.values()):
+        raise HTTPException(409, "Wait for the pictures or layout that are being made to finish, then update")
+    try:
+        return {"ok": True, "version": updater.apply()}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Couldn't download the update: {e}")
+
+
 # ---- books ----------------------------------------------------------------------------------
 
 @app.get("/api/books")
@@ -179,6 +198,13 @@ def delete_book(slug: str):
 def put_state(slug: str, updates: dict = Body(...)):
     _dir(slug)
     allowed = {k: v for k, v in updates.items() if k in ("step", "brief", "answers", "outline")}
+    pn = (allowed.get("brief") or {}).get("page_numbers")
+    if isinstance(pn, bool) and (text := state.read_yaml(slug)):  # the book is written: the toggle applies to it now
+        import yaml
+        data = yaml.safe_load(text)
+        if isinstance(data, dict) and data.get("page_numbers", True) != pn:
+            data["page_numbers"] = pn
+            state.write_yaml(slug, yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100))
     return state.save_state(slug, **allowed)
 
 
@@ -253,6 +279,38 @@ async def claude_revise(slug: str, body: dict = Body(...)):
     return {"yaml": text, "pages_view": state.pages_view(text)}
 
 
+@app.post("/api/books/{slug}/translate")
+async def translate_book(slug: str, body: dict = Body(...)):
+    """A copy of this finished book in another language, reusing its illustrations."""
+    import yaml
+    from .. import translate
+    d = _dir(slug)
+    language = (body.get("language") or "").strip()
+    if not language:
+        raise HTTPException(400, "choose a language")
+    if not (d / "book.yaml").exists() or not any((d / "build" / "art").glob("*.png")):
+        raise HTTPException(400, "this book has no finished art yet: illustrate it first")
+    try:
+        data = yaml.safe_load(state.read_yaml(slug))
+        spec_err = state.validate_yaml(state.read_yaml(slug))
+    except yaml.YAMLError as e:
+        raise HTTPException(422, f"book.yaml is not valid: {e}")
+    if spec_err:
+        raise HTTPException(422, f"book.yaml is not valid: {spec_err}")
+    if language.lower() == str(data.get("language", "English")).lower():
+        raise HTTPException(400, f"the book is already in {language}")
+    words = translate.texts(data, translate.finds(d / "build"))
+    translated = await _claude(author.translate(words, language, data.get("language", "English"), translate.check))
+    new_slug = state.slugify(f"{slug[:28]}-{language}")
+    result = translate.make(d, state.books_dir() / new_slug, data, translated, language)
+    st = state.load_state(slug)
+    brief = {**(st.get("brief") or {}), "language": language, "title": translated.get("title", data.get("title"))}
+    state.save_state(new_slug, step="art", brief=brief, translated_from=slug,
+                     **{k: st[k] for k in ("outline",) if k in st})
+    return {"slug": new_slug, **result,
+            "redraw_cost_usd": round(sum(spec.Book.model_validate(data).images.cost(s) for s in result["redraw"]), 2)}
+
+
 @app.post("/api/books/{slug}/listing")
 async def claude_listing(slug: str):
     _dir(slug)
@@ -280,7 +338,8 @@ def book_plan(slug: str):
                        "cost_usd": round(s.cost(x.id), 3)} for x in slots],
             "high_cost_usd": QUALITY_COST_USD["high"], "base_cost_usd": s.est_cost_per_image_usd,
             "model": s.model, "quality": s.quality, "estimate_usd": round(est, 2),
-            "lint": [{"where": i.where, "level": i.level, "message": i.message} for i in lint(p.book)]}
+            "lint": [{"where": i.where, "level": i.level, "message": i.message} for i in lint(p.book)],
+            "structure": templates.book_structure(p.book)}
 
 
 @app.get("/api/templates")
@@ -301,6 +360,15 @@ def save_template(body: dict = Body(...)):
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {**t.model_dump(), "pages": t.page_count()}
+
+
+@app.post("/api/templates/draft")
+async def draft_template(body: dict = Body(...)):
+    """Claude turns the writer's words into a structure. Nothing is saved until the writer saves it."""
+    request = (body.get("prompt") or "").strip()
+    if not request:
+        raise HTTPException(422, "Say what order you want")
+    return await _claude(author.template_draft(request, body.get("current")))
 
 
 @app.delete("/api/templates/{tid}")
