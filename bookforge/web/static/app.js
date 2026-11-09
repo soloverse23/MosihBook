@@ -491,22 +491,35 @@ async function uploadSource(slug, file) {
 }
 
 // Popular art styles shown as pictures (the same scene in each), so a writer sees what they pick.
-// The chosen style's art direction goes into the field; "Other style" lets them describe their own.
-let artStyles;
+// Tones work the same way, shown as the same opening line written in each tone.
+// The chosen preset's direction goes into the field; "Other" lets them describe their own.
+let artStyles, tones;
 const loadArtStyles = () => (artStyles ||= fetch("/styles/styles.json").then((r) => r.json()).catch(() => []));
+const loadTones = () => (tones ||= fetch("/styles/tones.json").then((r) => r.json()).catch(() => []));
 const isArtQuestion = (q) => q.id === "art_style" || /\b(art|illustration|drawing) style\b/i.test(q.question || "");
+const isToneQuestion = (q) => !isArtQuestion(q) && (q.id === "tone" || /\btone\b/i.test(q.question || ""));
 
 function stylePicker(styles, { name = "", id = "", value = "", label = "Art style" } = {}) {
-  const preset = styles.find((s) => s.art === value);
+  return presetPicker(styles.map((s) => ({ name: s.name, value: s.art, face: `<img src="/styles/${esc(s.id)}.jpg" alt="" loading="lazy">` })),
+    { name, id, value, label, other: "Other style", placeholder: "Describe the style: linocut prints, 1950s retro, pixel art…" });
+}
+
+function tonePicker(list, { name = "", id = "", value = "", label = "Tone" } = {}) {
+  return presetPicker(list.map((t) => ({ name: t.name, value: t.tone, face: `<span class="tone-sample">${esc(t.sample)}</span>` })),
+    { name, id, value, label, other: "Other tone", placeholder: "Describe the tone: dry humour, poetic, matter-of-fact…", cls: "tone-pick" });
+}
+
+function presetPicker(items, { name, id, value, label, other: otherLabel, placeholder, cls = "" }) {
+  const preset = items.find((s) => s.value === value);
   const other = !!value && !preset;
-  return `<div class="style-pick" role="radiogroup" aria-label="${esc(label)}">
-    <div class="style-grid">${styles.map((s) => `
-      <button type="button" class="style-card ${preset === s ? "on" : ""}" data-art="${esc(s.art)}" role="radio" aria-checked="${preset === s}" title="${esc(s.art)}">
-        <img src="/styles/${esc(s.id)}.jpg" alt="" loading="lazy"><span>${esc(s.name)}</span></button>`).join("")}
+  return `<div class="style-pick ${cls}" role="radiogroup" aria-label="${esc(label)}">
+    <div class="style-grid">${items.map((s) => `
+      <button type="button" class="style-card ${preset === s ? "on" : ""}" data-value="${esc(s.value)}" role="radio" aria-checked="${preset === s}" title="${esc(s.value)}">
+        ${s.face}<span>${esc(s.name)}</span></button>`).join("")}
       <button type="button" class="style-card other ${other ? "on" : ""}" data-other role="radio" aria-checked="${other}">
-        <span class="ph">${icon("edit")}</span><span>Other style</span></button></div>
+        <span class="ph">${icon("edit")}</span><span>${esc(otherLabel)}</span></button></div>
     <div class="style-other" ${other ? "" : "hidden"}><input class="input" ${id ? `id="${id}"` : ""} ${name ? `name="${name}"` : ""}
-      aria-label="${esc(label)}" value="${esc(value)}" placeholder="Describe the style: linocut prints, 1950s retro, pixel art…"></div>
+      aria-label="${esc(label)}" value="${esc(value)}" placeholder="${esc(placeholder)}"></div>
   </div>`;
 }
 
@@ -519,8 +532,8 @@ function wireStylePicker(root) {
       select(off ? null : c);
       if (c.dataset.other !== undefined) {
         box.hidden = off;
-        if (!off) { if (cards.some((x) => x.dataset.art === input.value)) input.value = ""; input.focus(); } else input.value = "";
-      } else { box.hidden = true; input.value = off ? "" : c.dataset.art; }  // click again: no style, Claude decides
+        if (!off) { if (cards.some((x) => x.dataset.value === input.value)) input.value = ""; input.focus(); } else input.value = "";
+      } else { box.hidden = true; input.value = off ? "" : c.dataset.value; }  // click again: none, Claude decides
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }));
   });
@@ -531,7 +544,7 @@ function wireStylePicker(root) {
 async function briefForm(slug, brief = {}, sources = []) {
   const { settings: s, trims } = await getSettings();
   const type = "storybook";
-  const styles = await loadArtStyles();
+  const [styles, toneList] = await Promise.all([loadArtStyles(), loadTones()]);
   const L = brief.learning || {}, W = brief.writing || {}, S = brief.structure || {};
   const filled = (o) => Object.values(o || {}).some((v) => v && (!Array.isArray(v) || v.length));
   const part = (n, id, title, why, body, { optional = true, open = true } = {}) => optional ? `
@@ -598,7 +611,8 @@ async function briefForm(slug, brief = {}, sources = []) {
       </div>`, { optional: false })}
     ${part(4, "b-voice", "Voice & look", "How it sounds and how it's drawn. Empty: Claude proposes.", `
       <div class="form-grid">
-        <div class="field"><label for="tone">Tone</label><input class="input" id="tone" name="tone" value="${esc(brief.tone || "")}" placeholder="Gentle, funny, adventurous…"></div>
+        <div class="field full"><span class="label">Tone <span class="faint">· pick one, or leave it to Claude</span></span>
+          ${tonePicker(toneList, { name: "tone", id: "tone", value: brief.tone || "" })}</div>
         <div class="field full"><span class="label">Art style <span class="faint">· pick one, or leave it to Claude</span></span>
           ${stylePicker(styles, { name: "art", id: "art", value: brief.art || "" })}</div>
         <div class="field"><label for="w-by">Writing inspired by</label>
@@ -658,7 +672,7 @@ async function briefForm(slug, brief = {}, sources = []) {
   const val = (n) => (el.elements[n]?.value || "").trim();
   const stats = {
     "b-learn": () => val("learning.topic") || (val("learning.marking") ? "Marking rule set" : ""),
-    "b-voice": () => [val("tone"), styles.find((x) => x.art === val("art"))?.name || val("art"), val("writing.inspired_by") && `like ${val("writing.inspired_by")}`].filter(Boolean).join(" · "),
+    "b-voice": () => [toneList.find((x) => x.tone === val("tone"))?.name || val("tone"), styles.find((x) => x.art === val("art"))?.name || val("art"), val("writing.inspired_by") && `like ${val("writing.inspired_by")}`].filter(Boolean).join(" · "),
     "b-print": () => [val("title") || "Title by Claude", val("trim"), el.page_numbers.checked ? "numbered" : "no numbers"].join(" · "),
   };
   const stat = () => Object.entries(stats).forEach(([id, f]) => {
@@ -1103,7 +1117,7 @@ async function stepBrief(host, b, slug) {
 
 async function stepQuestions(host, b, slug) {
   const qs = b.state.questions;
-  const styles = qs?.some(isArtQuestion) ? await loadArtStyles() : [];
+  const [styles, toneList] = await Promise.all([qs?.some(isArtQuestion) ? loadArtStyles() : [], qs?.some(isToneQuestion) ? loadTones() : []]);
   if (!qs) {
     host.innerHTML = stepHead("Questions", "Claude asks what it needs to know before outlining.") +
       `<div class="card"><div class="empty"><div class="ico">${icon("sparkle")}</div><p>Claude hasn't asked its questions yet.</p>
@@ -1117,7 +1131,8 @@ async function stepQuestions(host, b, slug) {
     <div class="card"><div class="card-b" id="qs">${qs.map((q, i) => `
       <div class="q" data-id="${esc(q.id)}"><span class="n">${i + 1}</span><div>
         <div class="qt">${esc(q.question)}</div>${q.why ? `<div class="qwhy">${esc(q.why)}</div>` : ""}
-        ${styles.length && isArtQuestion(q) ? stylePicker(styles, { value: answers[q.id] || "", label: q.question }) : `
+        ${styles.length && isArtQuestion(q) ? stylePicker(styles, { value: answers[q.id] || "", label: q.question })
+          : toneList.length && isToneQuestion(q) ? tonePicker(toneList, { value: answers[q.id] || "", label: q.question }) : `
         ${q.options?.length ? `<div class="chips">${q.options.map((o) => `<button type="button" class="chip ${answers[q.id] === o ? "on" : ""}">${esc(o)}</button>`).join("")}</div>` : ""}
         <input class="input" aria-label="${esc(q.question)}" value="${esc(answers[q.id] || "")}" placeholder="Your answer">`}</div></div>`).join("")}</div>
       <div class="card-f row between"><a class="btn ghost" href="#/book/${slug}/brief">${icon("edit")}Edit brief</a>

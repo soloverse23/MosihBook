@@ -689,6 +689,13 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 .style-card:hover { background: var(--sunk); }
 .style-card.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); color: var(--accent); }
 .style-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* tone picker: the same opening line written in each tone */
+.tone-pick .style-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.tone-pick .style-card { text-align: left; padding: 8px 10px 10px; align-content: start; }
+.tone-pick .style-card .tone-sample { display: block; min-height: 5.6em; padding: 8px 10px; border-radius: 6px; background: var(--sunk);
+  color: var(--ink-2); font: italic 400 12.5px/1.45 var(--serif, Georgia, serif); }
+.tone-pick .style-card.on .tone-sample { color: var(--ink); }
+.tone-pick .style-card .ph { aspect-ratio: auto; min-height: 5.6em; }
 
 /* templates page: simple flow + in-place editor */
 .sf { display: grid; gap: 8px; }

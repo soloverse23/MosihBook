@@ -1,0 +1,10 @@
+[
+  {"id": "gentle", "name": "Gentle & cozy", "tone": "Gentle and cozy: soft, warm words, a slow reassuring pace, small comforts, nothing scary", "sample": "Behind the roses, Milo found a tiny door. It was warm from the sun, and it smelled like toast."},
+  {"id": "funny", "name": "Funny & silly", "tone": "Funny and silly: playful exaggeration, surprises and wordplay, comic timing, giggles on every page", "sample": "Behind the roses, Milo found a tiny door. It sneezed. Doors are not supposed to sneeze."},
+  {"id": "adventure", "name": "Adventurous", "tone": "Adventurous: brisk pace, brave choices, a sense of discovery and excitement, short punchy sentences", "sample": "Behind the roses, Milo found a tiny door. He took a deep breath, pushed hard, and stepped into the unknown."},
+  {"id": "heartfelt", "name": "Warm & heartfelt", "tone": "Warm and heartfelt: kindness, friendship and feelings named simply, a tender ending that lingers", "sample": "Behind the roses, Milo found a tiny door. Grandma had planted those roses. Maybe she had known all along."},
+  {"id": "curious", "name": "Curious & wondering", "tone": "Curious and full of wonder: questions, noticing small details, awe at how the world works", "sample": "Behind the roses, Milo found a tiny door. Who could be small enough to use it? And where did it go?"},
+  {"id": "rhyme", "name": "Rhyming & bouncy", "tone": "Rhyming and bouncy: musical read-aloud rhythm, rhyming couplets, repetition children can join in", "sample": "Behind the roses, small and red, a door! \"Hello?\" young Milo said."},
+  {"id": "bedtime", "name": "Calm bedtime", "tone": "Calm bedtime: quiet, slow and soothing, soft repetition, winding down toward sleep", "sample": "Behind the roses, Milo found a tiny door. It was quiet there. The moon was quiet too."},
+  {"id": "mystery", "name": "Mysterious", "tone": "Mysterious, but never frightening: hints and clues, a little suspense, a satisfying reveal", "sample": "Behind the roses, Milo found a tiny door. It had not been there yesterday. Someone had left a key."}
+]
