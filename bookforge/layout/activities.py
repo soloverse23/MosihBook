@@ -12,7 +12,8 @@ from reportlab.platypus import Flowable, Paragraph
 
 from .. import kdp, maze as mazes
 from ..plan import COLORING_HEAD, split_chapter
-from ..spec import Book, Page
+from ..spec import Book, CertificateSpec, Page
+from ..words import word
 from .base import Sheet, para_html
 
 HEAD = 1.15  # inches at the top of an activity page for its title and instruction
@@ -273,11 +274,13 @@ def final_challenge_page(sheet: Sheet, interior: kdp.Interior, book: Book, p: Pa
     c.roundRect((cx0 + 0.12) * inch, (cy0 + 0.12) * inch, (cw - 0.24) * inch, (cert_h - 0.24) * inch,
                 0.14 * inch, stroke=1, fill=0)
     c.restoreState()
-    cert = p.certificate
+    cert = p.certificate or CertificateSpec()
+    title = cert.title or word(book, "well_done")
+    labels = (cert.name_label or word(book, "name"), cert.date_label or word(book, "date"))
     _star(sheet, cx0 + cw / 2, cy0 + cert_h - 0.5, 0.26)
-    sheet.text(f'<font name="{sheet.theme.heading}">{para_html(cert.title)}</font>',
+    sheet.text(f'<font name="{sheet.theme.heading}">{para_html(title)}</font>',
                (cx0 + 0.3, cy0 + cert_h - 1.3, cw - 0.6, 0.5), 22, safe=safe, min_size=12, align=TA_CENTER)
-    for k, label in enumerate((cert.name_label, cert.date_label)):
+    for k, label in enumerate(labels):
         ly = cy0 + 0.45 + (1 - k) * 0.7
         c.setFont(sheet.theme.body, 13)
         c.setFillColor(HexColor(sheet.theme.ink))
@@ -290,25 +293,71 @@ def final_challenge_page(sheet: Sheet, interior: kdp.Interior, book: Book, p: Pa
         c.restoreState()
 
 
-def answers(sheet: Sheet, book: Book) -> list:
-    """The solutions page's answers, made from the games' own data in page order (so they always match)."""
+class Card(Block):
+    """A Block on a soft rounded white card: one game's answers on the solutions page."""
+    PAD = 7  # points
+
+    def __init__(self, parts, gap: float = 8):
+        super().__init__(parts)
+        self.gap = gap
+
+    def wrap(self, aw, ah):
+        _, h = super().wrap(aw - 2 * self.PAD, ah)
+        self.width, self.height = aw, h + 2 * self.PAD
+        return aw, self.height
+
+    def getSpaceAfter(self):
+        return self.gap
+
+    def draw(self):
+        c = self.canv
+        c.saveState()
+        c.setFillColor(HexColor("#FFFFFF"))
+        c.setFillAlpha(0.72)
+        c.setStrokeColor(HexColor(self._accent))
+        c.setStrokeAlpha(0.35)
+        c.setLineWidth(0.8)
+        c.roundRect(0, 0, self.width, self.height, 9, stroke=1, fill=1)
+        c.restoreState()
+        c.saveState()
+        c.translate(self.PAD, self.PAD)
+        y = self.height - 2 * self.PAD
+        for f, (_, h) in zip(self.parts, self._sizes):
+            y -= h
+            f.drawOn(c, 0, y)
+            y -= f.getSpaceAfter()
+        c.restoreState()
+
+
+def answers(sheet: Sheet, book: Book, scale: float = 1.0) -> list:
+    """The solutions page's answers, made from the games' own data in page order (so they always match):
+    one card per game, its name on top in the accent color and the answers centred below. `scale` shrinks
+    it all so the page fits on one page."""
     accent = sheet.theme.accent
-    body = sheet.style(10.5, align=TA_LEFT, leading=1.35)
-    body.spaceAfter = 6
+    label = sheet.style(12.5 * scale, font=sheet.theme.heading, align=TA_CENTER, color=accent, leading=1.2)
+    label.spaceAfter = 1
+    body = sheet.style(11 * scale, align=TA_CENTER, leading=1.45)
+    body.spaceAfter = 0
     out = []
     for n, p in enumerate(book.pages, 1):
         name = (split_chapter(p.chapter)[1] if p.chapter else "") or f"p. {n}"
-        title = f'<font name="{sheet.theme.heading}" color="{accent}">{para_html(name)}</font>'
         if p.kind == "maze" and p.maze:
-            out.append(Block([Paragraph(title, body), MazeAnswer(p.maze, 1.4)]))
+            parts = [Paragraph(para_html(name), label), MazeAnswer(p.maze, min(1.5, 1.25 * p.maze.cols / p.maze.rows) * scale)]
+        elif not p.drawn_activity or p.kind == "final_challenge":
             continue
-        if not p.drawn_activity or p.kind == "final_challenge":
-            continue
-        if p.matching:
-            lines = [f"{para_html(a)} — {para_html(b)}" for a, b in p.matching.pairs]
-        elif p.fill_in:
-            lines = [f"<b>{i}.</b> {para_html(it.answer)}" for i, it in enumerate(p.fill_in.items, 1)]
         else:
-            lines = [f"<b>{i}.</b> {para_html(g.answer)}" for i, g in enumerate(p.odd_one_out.groups, 1)]
-        out.append(Paragraph(f"{title}&nbsp;&nbsp; " + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(lines), body))
+            if p.matching:
+                lines = [f"{para_html(a)}&nbsp;—&nbsp;{para_html(b)}" for a, b in p.matching.pairs]  # a pair never breaks
+            elif p.fill_in:
+                lines = [f'<font color="{accent}">{i}.</font>&nbsp;{para_html(it.answer)}'
+                         for i, it in enumerate(p.fill_in.items, 1)]
+            else:
+                lines = [f'<font color="{accent}">{i}.</font>&nbsp;{para_html(g.answer)}'
+                         for i, g in enumerate(p.odd_one_out.groups, 1)]
+            parts = [Paragraph(para_html(name), label), Paragraph("&nbsp;&nbsp;&nbsp; ".join(lines), body)]
+        card = Card(parts, gap=8 * scale)
+        card._accent = accent
+        if p.kind == "maze":
+            card.max_w = max(2.6, 1.5 * scale + 1.0)  # the maze with a little air, not a wide empty card
+        out.append(card)
     return out

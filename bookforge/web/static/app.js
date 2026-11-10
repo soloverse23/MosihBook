@@ -54,7 +54,7 @@ const icon = (n, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hi
 // ---------- full-screen image viewer ----------
 // Click any preview image (book spreads, cover, art review, characters) to see it full screen.
 // Arrows / swipe browse the images in the same group, Esc or a click outside closes, a click on the image toggles 100%.
-const LIGHTBOX_IMGS = ".spread img, .cover-view img, .shot .img img";
+const LIGHTBOX_IMGS = ".spread img, .cover-view img, .shot .img img, .insp-img img";
 document.addEventListener("click", (e) => {
   const img = e.target.closest(LIGHTBOX_IMGS);
   if (!img || e.button !== 0) return;
@@ -132,7 +132,7 @@ function timeAgo(sec) {
 }
 
 async function api(method, url, body) {
-  const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : {},
+  const res = await fetch(url, { method, cache: "no-store", headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined });
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
   if (!res.ok) throw new Error(typeof data === "object" ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : data);
@@ -271,7 +271,7 @@ function dictate(field, btn) {
 
 // ---------- jobs ----------
 function logLine(s) {
-  const cls = /^(ERROR|FAILED|NEEDS ATTENTION)/.test(s) ? "e" : /^WARN/.test(s) ? "w" : /PASS|score \d/.test(s) ? "g" : "";
+  const cls = /^(ERROR|FAILED|NEEDS ATTENTION)/.test(s) ? "e" : /^WARN/.test(s) ? "w" : /PASS/.test(s) ? "g" : "";
   return `<span class="${cls}">${esc(s)}</span>\n`;
 }
 
@@ -293,9 +293,7 @@ const JOB_LABELS = { mock: "Building preview", pilot: "Generating pilot", art: "
 function liveTile(slug, id, im) {
   if (!im) return `<div class="shot drawing" data-tile="${esc(id)}"><div class="img"><div class="sk"></div><span class="spin"></span></div>
     <div class="m"><div class="row between"><span class="tag">${esc(id)}</span><span class="faint xs">drawing…</span></div></div></div>`;
-  const score = /score (\d+)/.exec(im.result)?.[1];
   const badge = im.failed ? `<span class="badge err">failed</span>`
-    : score ? `<span class="badge ${+score >= 7 ? "ok" : "warn"}">${score}/10</span>`
     : /no cost/.test(im.result) ? `<span class="badge plain">already had</span>` : `<span class="badge ok">done</span>`;
   const src = `/api/books/${slug}/build/thumbs/${id}.jpg?${Math.round(im.t)}`;
   return `<div class="shot landed ${im.failed ? "bad" : ""}" data-tile="${esc(id)}"><div class="img">${im.failed ? icon("alert")
@@ -427,11 +425,14 @@ async function library() {
       <div class="row gap3">${books.length ? `<div class="seg" id="filter">${[["all", "All"], ["progress", "In progress"], ["ready", "Ready"]].map(([k, l]) =>
         `<button data-f="${k}" class="${k === filter ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
         <a class="btn primary" href="#/new">${icon("plus")}New book</a></div></div>
-    ${books.length ? `<div class="books">${books.filter(show).map((b) => `<div class="tile">${b.status === "ready"
-      ? `<button class="btn sm tile-act" data-tr="${b.slug}" data-title="${esc(b.title)}" title="Same pictures, translated text">${icon("globe")}Translate</button>` : ""}
+    ${books.length ? `<div class="books">${books.filter(show).map((b) => `<div class="tile${b.origin ? " edition" : ""}">${b.status === "ready"
+      ? `<button class="btn sm tile-act" data-tr="${b.origin?.slug || b.slug}" data-title="${esc(b.origin?.title || b.title)}" title="Same pictures, translated text">${icon("globe")}Translate</button>` : ""}
       <a class="book" href="#/book/${b.slug}">
-        <div class="cover">${b.cover ? `<img src="/api/books/${b.slug}/front.jpg?${b.updated}" alt="">` : coverPlaceholder(b.title, b.type)}</div>
+        <div class="cover">${b.cover ? `<img src="/api/books/${b.slug}/front.jpg?${b.updated}" alt="">` : coverPlaceholder(b.title, b.type)}
+          ${b.origin || b.editions ? `<span class="lang-tag">${icon("globe")}${esc(b.language)}</span>` : ""}</div>
         <div class="meta"><h3>${esc(b.title)}</h3>
+          ${b.origin ? `<span class="ed-of xs" title="Same book, same pictures">Translation of <b>${esc(b.origin.title)}</b></span>`
+            : b.editions ? `<span class="ed-of xs">Original · ${b.editions} languages</span>` : ""}
           <div class="row between">${badge(b.status)}<span class="faint xs">${timeAgo(b.updated)}</span></div>
           <span class="faint xs">${esc(TYPES[b.type]?.label || "")}${b.pages ? ` · ${b.pages} pages` : ""}</span></div></a></div>`).join("")}
       <a class="newtile" href="#/new">${icon("plus")}New book</a></div>`
@@ -443,17 +444,25 @@ async function library() {
 }
 
 // A finished book in another language: Claude translates the words, the illustrations are reused.
-const LANGS = ["English", "French", "German", "Spanish", "Italian", "Portuguese", "Dutch", "Swedish", "Polish", "Romanian", "Turkish"];
+// the languages a book can be written in (bookforge/words.py LANGUAGES)
+const LANGS = ["English", "French", "German", "Romanian", "Spanish"];
+const LANG_NATIVE = { English: "English", French: "Français · French", German: "Deutsch · German",
+  Romanian: "Română · Romanian", Spanish: "Español · Spanish" };
+const LANG_ALIAS = { en: "English", fr: "French", francais: "French", "français": "French", de: "German", deutsch: "German",
+  germany: "German", ro: "Romanian", romana: "Romanian", "română": "Romanian", es: "Spanish", espanol: "Spanish", "español": "Spanish" };
+const langOf = (v) => { const k = String(v || "English").trim().toLowerCase();
+  return LANGS.find((l) => l.toLowerCase() === k) || LANG_ALIAS[k] || "English"; };
 async function translateBook(slug, title, btn) {
   const v = await modal({ title: `Translate “${title}”`, confirm: "Translate",
-    body: "Claude translates every page. Pictures without words in them are reused as they are, at no cost, and the new book is laid out straight away.",
-    fields: `<div class="field" style="margin-top:var(--s3)"><label for="tr-lang">Language</label>
-      <input class="input" id="tr-lang" name="language" list="tr-langs" required placeholder="French">
-      <datalist id="tr-langs">${LANGS.map((l) => `<option value="${l}">`).join("")}</datalist>
-      <span class="hint">The print fonts cover Latin script only, so Persian, Arabic and other scripts aren't supported yet.</span></div>` });
-  if (!v?.language?.trim()) return;
-  toast(`Claude is translating into ${v.language.trim()}. This takes about a minute.`);
-  const r = await busy(btn, "Translating…", () => api("POST", `/api/books/${slug}/translate`, { language: v.language.trim() }));
+    body: "The same art and the same text, translated by Claude. Pictures without words in them are reused as they are, and the new book is laid out straight away.",
+    fields: `<div class="field" style="margin-top:var(--s3)"><label for="tr-lang-m">Language</label>
+      <select class="input" id="tr-lang-m" name="language">${LANGS.map((l) => `<option value="${l}">${LANG_NATIVE[l]}</option>`).join("")}</select></div>` });
+  if (v?.language?.trim()) await runTranslate(slug, v.language.trim(), btn);
+}
+
+async function runTranslate(slug, language, btn) {
+  toast(`Claude is translating into ${language}. This takes about a minute.`);
+  const r = await busy(btn, "Translating…", () => api("POST", `/api/books/${slug}/translate`, { language }));
   if (!r) return;
   if (!r.redraw.length) {
     await api("POST", `/api/books/${r.slug}/jobs/build`).catch((e) => toast(e.message, true));
@@ -591,9 +600,10 @@ async function briefForm(slug, brief = {}, sources = []) {
         <span class="hint">Premise, main character, setting, how it ends if you know. The lesson goes in part 2.</span></div>
       <div class="form-grid">
         <div class="field"><label for="audience">Reader age</label><input class="input" id="audience" name="audience" value="${esc(brief.audience || "")}" placeholder="3–6"></div>
-        <div class="field"><label for="language">Language</label><input class="input" id="language" name="language" value="${esc(brief.language || "English")}"></div>
+        <div class="field"><label for="language">Language</label><select class="input" id="language" name="language">${
+          LANGS.map((l) => `<option value="${l}" ${langOf(brief.language) === l ? "selected" : ""}>${LANG_NATIVE[l]}</option>`).join("")}</select>
+          <span class="hint">Every word in the book, pictures included, is written in this language.</span></div>
       </div>
-      <div id="langwarn" hidden>${note("warn", "Words are lettered into the pictures by the image model, which only writes Latin script reliably. Persian, Arabic and other scripts aren't supported yet.")}</div>
       <div class="field" id="cast-field" hidden><span class="label">Characters from your library <span class="faint">· optional</span></span>
         <div class="cast" id="cast"></div>
         <span class="hint">Ticked characters are written into the story with their exact look, for a series.</span></div>
@@ -616,11 +626,11 @@ async function briefForm(slug, brief = {}, sources = []) {
       </div>`, { open: filled(L) })}
     ${part(3, "b-structure", "Pages & structure", "Which parts the book has, in what order: intro, story, exercises, closing.", `
       <div class="tpl-cards" id="tpls" role="radiogroup" aria-label="Structure"></div>
-      <div class="te-ask" id="tpl-ask">
-        <label for="tpl-prompt"><b>${icon("sparkle")}<span id="tpl-ask-label">Or describe the structure you want</span></b></label>
-        <textarea class="input" id="tpl-prompt" rows="2"></textarea>
+      <details class="ask-d" id="tpl-ask">
+        <summary>${icon("sparkle")}<span id="tpl-ask-label">Or describe the structure you want</span>${icon("chevR", "chev")}</summary>
+        <div class="ask-d-b"><textarea class="input" id="tpl-prompt" rows="2" aria-label="Describe the structure"></textarea>
         <div class="row between wrap gap3"><span class="faint xs">Claude builds the order for this book. You can still change it below and save it as a template.</span>
-          <button type="button" class="btn sm" id="tpl-go">${icon("sparkle")}Build with Claude</button></div></div>
+          <button type="button" class="btn sm" id="tpl-go">${icon("sparkle")}Build with Claude</button></div></div></details>
       <div class="field" id="len-field" style="max-width:360px"><label for="length">Length</label>
         <input class="input" id="length" name="length" value="${esc(brief.length || "")}" placeholder="32 pages · 8 chapters">
         <span class="hint">Claude plans the pages itself: no fixed exercise section.</span></div>
@@ -661,7 +671,7 @@ async function briefForm(slug, brief = {}, sources = []) {
         <div class="field"><span class="label">Page numbers</span>
           <label class="check" style="height:36px"><input type="checkbox" name="page_numbers" ${brief.page_numbers === false ? "" : "checked"}> Print a number on every page</label></div>
       </div>`, { open: false })}
-    <div class="brief-foot row between"><span class="faint small">Next, Claude asks only about what's still open. About 10 seconds.</span>
+    <div class="brief-foot row between"><span class="faint small">Only the idea is required. Next, Claude asks about what's still open (about 10 seconds).</span>
       <button class="btn primary" type="submit">${icon("sparkle")}${slug ? "Save and ask again" : "Continue"}</button></div>`;
   let saved = sources.slice(), pending = [];
   const list = $("#attach-list", el);
@@ -690,8 +700,6 @@ async function briefForm(slug, brief = {}, sources = []) {
   drawFiles();
   voiceify(el);
   wireStylePicker(el);
-  const lang = () => ($("#langwarn", el).hidden = /^(english|en|)$|french|german|spanish|italian|dutch|portuguese/i.test(el.language.value.trim()));
-  el.language.addEventListener("input", lang); lang();
   api("GET", "/api/characters").then(({ characters: lib }) => {
     if (!lib.length) return;
     $("#cast-field", el).hidden = false;
@@ -819,11 +827,13 @@ function structureEditor(el, initial) {
     cards();
   };
   // the games & exercises a structure can have, what each page is, and who makes it
+  let actsOpen = false;
   const drawActs = () => {
     const box = $("#acts", el);
     const on = !!secs.length;
     const count = (k) => secs.filter((x) => x.kind === k && x.enabled !== false).reduce((n, x) => n + (Number(x.pages) || 0), 0);
-    box.innerHTML = `<div><h4>Games &amp; exercises you can add</h4>
+    const added = ACTIVITIES.filter(([k]) => count(k)).length;
+    box.innerHTML = `<details class="acts-d" ${actsOpen ? "open" : ""}><summary><span><h4>Games &amp; exercises you can add</h4>${added ? `<span class="set xs">${icon("check")}${added} added</span>` : ""}</span>${icon("chevR", "chev")}</summary>
         <p class="faint xs">${on ? "Add any of these to this book. The answers to every game print on the solutions page automatically."
           : "These come with a structure: pick one above (or describe one), then add games here. A free book gets games Claude invents."}</p></div>
       <div class="act-grid">${ACTIVITIES.map(([k, desc, who]) => {
@@ -834,7 +844,8 @@ function structureEditor(el, initial) {
             <span class="act-who ${who}">${ACT_WHO[who]}</span>
             <span class="row between"><span class="faint xs">${n ? `${n} page${n > 1 ? "s" : ""} in this book` : ""}</span>
               <button type="button" class="btn sm ghost" data-act="${k}" ${on ? "" : "disabled"}>+ Add</button></span></div></div>`;
-      }).join("")}</div>`;
+      }).join("")}</div></details>`;
+    $("details", box).ontoggle = (e) => { actsOpen = e.currentTarget.open; };
     $$("[data-act]", box).forEach((b) => (b.onclick = () => {
       const at = secs.findIndex((x) => PHASE_OF[x.kind] === "end");  // games go before the closing pages
       secs.splice(at < 0 ? secs.length : at, 0, { kind: b.dataset.act, pages: 1, enabled: true });
@@ -1403,26 +1414,55 @@ function lintHtml(slug, issues, extra = "") {
     `<li><b>${esc(i.where)}</b> · ${esc(i.message)} ${ignoreBtn(slug, lintKey(i))}</li>`).join("")}</ul>${extra}`)}</div>`;
 }
 
+// The built book, one spread at a time: arrows, keys or the slider turn the pages, so a 40-page book
+// stays one screen tall. Every spread is in the DOM (lazy, hidden) so the lightbox can still browse them all.
 async function spreadViewer(el, slug) {
   const pr = await api("GET", `/api/books/${slug}/proofs`);
   if (!pr.pages.length) { el.innerHTML = ""; return; }
   const v = Date.now(), src = (n) => `/api/books/${slug}/build/proofs/${n}?${v}`;
   const spreads = [[null, pr.pages[0]]];
   for (let i = 1; i < pr.pages.length; i += 2) spreads.push([pr.pages[i], pr.pages[i + 1] || null]);
-  let width = 880;
+  const label = (i) => (i === 0 ? "Page 1" : spreads[i][1] ? `Pages ${2 * i}–${2 * i + 1}` : `Page ${2 * i}`);
+  let width = 880, at = 0;
   try { width = +localStorage.getItem("zoom") || 880; } catch {}
-  el.innerHTML = `<div class="viewer" style="--w:${width}px">
-    <div class="viewer-bar"><div class="seg" id="vmode"><button class="on" data-v="spreads">Spreads</button>${pr.cover ? `<button data-v="cover">Cover</button>` : ""}</div>
-      <label class="row small muted">Zoom <input type="range" id="zoom" min="420" max="1200" step="20" value="${width}"></label></div>
-    <div class="spreads" id="v-spreads">${spreads.map((s, i) => `
-      <div class="spread ${i === 0 ? "first" : ""}">${s.map((p) => (p ? `<img src="${src(p)}" alt="${esc(p)}" loading="lazy">` : `<div class="blank"></div>`)).join("")}</div>
-      <div class="spread-label">${i === 0 ? "1" : `${2 * i} – ${2 * i + 1}`}</div>`).join("")}</div>
-    <div class="cover-view" id="v-cover" hidden>${pr.cover ? `<img src="${src("cover.png")}" alt="Full cover: back, spine, front">` : ""}</div></div>`;
-  $("#zoom", el).oninput = (e) => { el.firstElementChild.style.setProperty("--w", `${e.target.value}px`); try { localStorage.setItem("zoom", e.target.value); } catch {} };
+  el.innerHTML = `<div class="card"><div class="card-h"><div><h3>The book</h3><p>${pr.pages.length} pages as they print. Use ← → to turn the pages.</p></div>
+      <div class="seg" id="vmode"><button class="on" data-v="spreads">Pages</button>${pr.cover ? `<button data-v="cover">Cover</button>` : ""}</div></div>
+    <div class="viewer" style="--w:${width}px" tabindex="0" aria-label="Book viewer">
+      <div id="v-spreads">
+        <div class="flip">
+          <button class="btn icon flip-nav" id="v-prev" aria-label="Previous pages">${icon("arrow", "flipx")}</button>
+          <div class="spreads">${spreads.map((s, i) => `
+            <div class="spread ${i === 0 ? "first" : ""}" data-i="${i}" ${i ? "hidden" : ""}>${s.map((p) => (p ? `<img src="${src(p)}" alt="${esc(p)}" loading="lazy">` : `<div class="blank"></div>`)).join("")}</div>`).join("")}</div>
+          <button class="btn icon flip-nav" id="v-next" aria-label="Next pages">${icon("arrow")}</button></div>
+        <div class="flip-bar">
+          <span class="num small" id="v-label"></span>
+          <input type="range" id="v-at" min="0" max="${spreads.length - 1}" value="0" aria-label="Spread">
+          <span class="faint small num" id="v-of"></span>
+          <label class="row small muted flip-zoom">Zoom <input type="range" id="zoom" min="420" max="1200" step="20" value="${width}"></label></div></div>
+      <div class="cover-view" id="v-cover" hidden>${pr.cover ? `<img src="${src("cover.png")}" alt="Full cover: back, spine, front">` : ""}</div></div></div>`;
+  const viewer = $(".viewer", el);
+  const go = (i) => {
+    at = Math.max(0, Math.min(spreads.length - 1, i));
+    $$(".spread", el).forEach((s) => (s.hidden = +s.dataset.i !== at));
+    $("#v-label", el).textContent = label(at);
+    $("#v-of", el).textContent = `${at + 1} / ${spreads.length}`;
+    $("#v-at", el).value = at;
+    $("#v-prev", el).disabled = at === 0; $("#v-next", el).disabled = at === spreads.length - 1;
+  };
+  $("#v-prev", el).onclick = () => go(at - 1);
+  $("#v-next", el).onclick = () => go(at + 1);
+  $("#v-at", el).oninput = (e) => go(+e.target.value);
+  viewer.addEventListener("keydown", (e) => {
+    if (e.target.matches("input")) return;
+    if (e.key === "ArrowLeft") { go(at - 1); e.preventDefault(); }
+    if (e.key === "ArrowRight") { go(at + 1); e.preventDefault(); }
+  });
+  $("#zoom", el).oninput = (e) => { viewer.style.setProperty("--w", `${e.target.value}px`); try { localStorage.setItem("zoom", e.target.value); } catch {} };
   $$("#vmode button", el).forEach((b) => (b.onclick = () => {
     $$("#vmode button", el).forEach((x) => x.classList.toggle("on", x === b));
     $("#v-spreads", el).hidden = b.dataset.v !== "spreads"; $("#v-cover", el).hidden = b.dataset.v !== "cover";
   }));
+  go(0);
 }
 
 // map of the book: intro, story, exercises, closing, in the order they print
@@ -1430,178 +1470,273 @@ function structureCard(structure, slug) {
   if (!structure?.length) return "";
   const play = structure.filter((x) => ["learn", "play"].includes(x.phase || PHASE_OF[x.kind]));
   const n = play.reduce((a, x) => a + x.pages, 0);
-  return `<div class="card"><div class="card-h"><div><h3>Book structure</h3>
+  return `<details class="card fold"><summary class="card-h"><div><h3>Book structure</h3>
       <p>${n ? `${n} exercise and learning ${n === 1 ? "page" : "pages"} after the story: ${esc(play.map((x) => x.title || x.kind).join(" · "))}.`
-        : `Story only. To add a parents' note, coloring pages, matching games or a maze, pick a template under Book structure in the <a href="#/book/${slug}/brief">brief</a>, then write the book again.`}</p></div></div>
-    <div class="card-b">${bookFlow(structure, {}, { ranges: false })}</div></div>`;
+        : `Story only. To add a parents' note, coloring pages, matching games or a maze, pick a template under Book structure in the <a href="#/book/${slug}/brief">brief</a>, then write the book again.`}</p></div></summary>
+    <div class="card-b">${bookFlow(structure, {}, { ranges: false })}</div></details>`;
 }
 
-function slotTable(p) {
-  return `<table><thead><tr><th>Slot</th><th>Kind</th><th>Characters</th><th class="r">Est.</th><th class="r">High</th></tr></thead>
-    <tbody>${p.slots.map((s) => `<tr><td><span class="tag">${esc(s.id)}</span></td><td>${esc(s.kind.replace(/_/g, " "))}</td>
-      <td class="muted">${esc(s.characters.join(", ")) || "–"}</td><td class="r">${money(s.cost_usd)}</td>
-      <td class="r"><label class="switch"><input type="checkbox" data-high="${esc(s.id)}" ${s.quality === "high" ? "checked" : ""} aria-label="High quality for ${esc(s.id)}"><i></i></label></td></tr>`).join("")}</tbody></table>`;
+// what a slot is called on screen: "Page 12", "Front cover", "Nina"
+function slotName(s) {
+  const m = /^p(\d+)$/.exec(s.id);
+  if (m) return `Page ${+m[1]}`;
+  if (s.id === "cover-front") return "Front cover";
+  if (s.id === "cover-back") return "Back cover";
+  const t = s.id.replace(/^char-/, "").replace(/[-_]+/g, " ");
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }
+const isPageSlot = (s) => /^p\d+$/.test(s.id);
+const isFrontSlot = (s) => s.kind === "character" || /^cover-/.test(s.id);
 
-function wireSlotTable(slug, onChange) {
-  $$("[data-high]").forEach((c) => (c.onchange = async () => {
-    try {
-      const p = await api("PUT", `/api/books/${slug}/high`, { slots: [c.dataset.high], on: c.checked });
-      $("#slots").innerHTML = slotTable(p); wireSlotTable(slug, onChange);
-      $$(".est").forEach((e) => (e.textContent = money(p.estimate_usd)));
-      onChange?.(p);
-      toast(`${c.dataset.high} → ${c.checked ? "high" : p.quality} · book now ~${money(p.estimate_usd)}`);
-    } catch (e) { c.checked = !c.checked; toast(e.message, true); }
-  }));
-}
-
-async function reviewGrid(el, slug, slots) {
-  const r = await api("GET", `/api/books/${slug}/review`);
-  if (!r.slots.length) { el.hidden = true; return; }
+// Every illustration as a small tile, with one inspector beside the grid for the selected image:
+// big preview, the problems found, quality and Redo. Forty pages stay a compact grid, not a long list.
+function artGallery(el, slug, ctx, { slots, filters = true, title = "Illustrations", sub = "" }) {
+  const issuesOf = (id) => notIgnored(slug, ctx.review.get(id)?.issues || [], (i) => `art|${id}|${i}`);
+  const state = (s) => (!s.has_art ? "missing" : issuesOf(s.id).length ? "bad" : "ok");
+  let filter = "all";
+  let sel = slots.some((s) => s.id === ctx.sel) ? ctx.sel : (slots.find((s) => state(s) === "bad") || slots.find((s) => s.has_art) || slots[0])?.id;
+  const thumb = (s) => `/api/books/${slug}/build/thumbs/${s.id}.jpg?${ctx.v}`;
+  const full = (s) => `/api/books/${slug}/build/art/${s.id}.png?${ctx.v}`;
+  const tile = (s) => `<button type="button" class="gal-t ${state(s)} ${s.id === sel ? "on" : ""}" data-sel="${esc(s.id)}" title="${esc(slotName(s))}">
+      <span class="gal-i">${s.has_art ? `<img src="${thumb(s)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${full(s)}'">` : icon("image")}</span>
+      <span class="gal-n">${state(s) === "bad" ? `<i class="dot err"></i>` : ""}${esc(slotName(s))}${s.quality === "high" ? `<em>HQ</em>` : ""}</span></button>`;
+  const group = (name, list) => list.length ? `<div class="gal-g"><div class="gal-h">${name}<span class="faint">${list.length}</span></div>
+      <div class="gal-grid">${list.map(tile).join("")}</div></div>` : "";
+  const inspector = () => {
+    const s = slots.find((x) => x.id === sel);
+    if (!s) return `<div class="insp empty faint small">Pick an image to see it here.</div>`;
+    const iss = issuesOf(s.id), i = slots.indexOf(s);
+    return `<div class="insp">
+      <div class="insp-top"><button class="btn sm icon ghost" data-step="-1" ${i ? "" : "disabled"} aria-label="Previous image">${icon("arrow", "flipx")}</button>
+        <div class="insp-t"><b>${esc(slotName(s))}</b><span class="faint xs">${esc(s.kind.replace(/_/g, " "))}${s.characters.length ? ` · ${esc(s.characters.join(", "))}` : ""}</span></div>
+        <button class="btn sm icon ghost" data-step="1" ${i < slots.length - 1 ? "" : "disabled"} aria-label="Next image">${icon("arrow")}</button></div>
+      <div class="insp-img">${s.has_art ? `<img src="${thumb(s)}" data-full="${full(s)}" alt="${esc(slotName(s))}" onerror="this.onerror=null;this.src='${full(s)}'">`
+        : `<div class="insp-none">${icon("image")}<span>Not drawn yet</span></div>`}</div>
+      ${iss.length ? `<div data-ignorable>${note("err", `<b>${iss.length === 1 ? "Needs a fix" : `${iss.length} things to fix`}</b><ul>${iss.map((x) => `<li>${esc(x)} ${ignoreBtn(slug, `art|${s.id}|${x}`)}</li>`).join("")}</ul>`)}</div>` : ""}
+      <label class="insp-q"><span><b class="small">High quality</b><span class="faint xs">~${money(ctx.p.high_cost_usd)} instead of ~${money(ctx.p.base_cost_usd)}${s.has_art ? ", applies on the next redraw" : ""}</span></span>
+        <span class="switch"><input type="checkbox" data-high="${esc(s.id)}" ${s.quality === "high" ? "checked" : ""} aria-label="High quality for ${esc(slotName(s))}"><i></i></span></label>
+      ${s.has_art ? `<button class="btn" data-redo="${esc(s.id)}">${icon("refresh")}Redo this image</button>`
+        : `<p class="faint xs">Drawn by Generate all art, ~${money(s.cost_usd)}.</p>`}</div>`;
+  };
+  const draw = () => {
+    const counts = { bad: slots.filter((s) => state(s) === "bad").length, missing: slots.filter((s) => state(s) === "missing").length };
+    if ((filter === "bad" && !counts.bad) || (filter === "missing" && !counts.missing)) filter = "all";
+    const shown = slots.filter((s) => filter === "all" || state(s) === filter);
+    const fronts = shown.filter(isFrontSlot), pages = shown.filter((s) => !isFrontSlot(s));
+    const seg = filters && (counts.bad || counts.missing) ? `<div class="seg" id="gal-f">
+        <button data-f="all" class="${filter === "all" ? "on" : ""}">All ${slots.length}</button>
+        ${counts.bad ? `<button data-f="bad" class="${filter === "bad" ? "on" : ""}">Need a fix ${counts.bad}</button>` : ""}
+        ${counts.missing ? `<button data-f="missing" class="${filter === "missing" ? "on" : ""}">Not drawn ${counts.missing}</button>` : ""}</div>` : "";
+    el.innerHTML = `<div class="card-h"><div><h3>${title}</h3>${sub ? `<p>${sub}</p>` : ""}</div>${seg}</div>
+      <div class="card-b gal">
+        <div class="gal-list">${group("Characters &amp; cover", fronts)}${group("Pages", pages)}${shown.length ? "" : `<p class="faint small">Nothing here.</p>`}</div>
+        ${inspector()}</div>`;
+    $$("[data-sel]", el).forEach((b) => (b.onclick = () => { sel = ctx.sel = b.dataset.sel; draw(); }));
+    $$("[data-f]", el).forEach((b) => (b.onclick = () => { filter = b.dataset.f; draw(); }));
+    $$("[data-step]", el).forEach((b) => (b.onclick = () => { const i = slots.findIndex((s) => s.id === sel) + +b.dataset.step; if (slots[i]) { sel = ctx.sel = slots[i].id; draw(); } }));
+    $$("[data-redo]", el).forEach((b) => (b.onclick = () => ctx.redo(b.dataset.redo, b)));
+    $$("[data-high]", el).forEach((c) => (c.onchange = async () => {
+      try {
+        const np = await api("PUT", `/api/books/${slug}/high`, { slots: [c.dataset.high], on: c.checked });
+        ctx.setPlan(np);
+        np.slots.forEach((n) => { const s = slots.find((x) => x.id === n.id); if (s) Object.assign(s, n); });
+        toast(`${slotName({ id: c.dataset.high })} → ${c.checked ? "high" : np.quality} · book now ~${money(np.estimate_usd)}`);
+        draw();
+      } catch (e) { c.checked = !c.checked; toast(e.message, true); }
+    }));
+    // an ignored problem may leave the image clean: redraw once the global Ignore handler has run
+    $$("[data-ignore]", el).forEach((b) => b.addEventListener("click", () => setTimeout(draw)));
+  };
+  if (!slots.length) { el.hidden = true; return; }
   el.hidden = false;
-  const bad = r.slots.filter((s) => !s.ok).length;
-  const v = Date.now();
-  el.innerHTML = `<div class="card-h"><div><h3>Art review ${r.mock ? `<span class="badge warn" style="margin-left:6px">placeholder art</span>` : ""}</h3>
-      <p>${r.slots.length} images · ${bad ? `<span style="color:var(--warn)">${bad} need attention</span>` : "all passed"}</p></div></div>
-    <div class="card-b"><div class="review">${r.slots.map((s) => `
-      <div class="shot ${s.ok ? "" : "bad"}"><div class="img"><img src="/api/books/${slug}/build/${s.thumb}?${v}" data-full="/api/books/${slug}/build/art/${s.id}.png?${v}" alt="${esc(s.id)}" loading="lazy"></div>
-        <div class="m"><div class="row between"><span class="tag">${esc(s.id)}</span>
-          ${s.score == null ? `<span class="badge plain">not reviewed</span>` : `<span class="badge ${s.ok ? "ok" : "warn"}">${s.score}/10</span>`}</div>
-          ${s.issues.length ? `<ul>${s.issues.slice(0, 3).map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
-          <div class="row between"><span class="faint xs">${s.ok ? "" : "needs a fix"}</span>
-            <button class="btn sm ghost" data-redo="${esc(s.id)}">${icon("refresh")}Redo</button></div></div></div>`).join("")}</div></div>`;
-  $$("[data-redo]", el).forEach((btn) => (btn.onclick = () => slots.redo(btn.dataset.redo, btn)));
-}
-
-async function characterCard(el, slug) {
-  const r = await api("GET", `/api/books/${slug}/characters`).catch(() => null);
-  if (!r || !r.characters.length) { el.hidden = true; return; }
-  el.hidden = false;
-  const locked = r.characters.filter((c) => c.locked).length;
-  const v = Date.now();
-  el.innerHTML = `<div class="card-h"><div><h3>Characters</h3>
-      <p>${locked} of ${r.characters.length} locked. A locked look is reused on every page and in later books of the series.</p></div></div>
-    <div class="card-b"><div class="review">${r.characters.map((c) => `
-      <div class="shot"><div class="img">${c.locked ? `<img src="/api/books/${slug}/characters/${encodeURIComponent(c.id)}.png?${v}" alt="${esc(c.name)}" loading="lazy">` : ""}</div>
-        <div class="m"><div class="row between"><span class="tag">${esc(c.name)}</span>
-          ${c.locked ? `<span class="badge ok">locked</span>` : `<span class="badge plain">drawn on the next run</span>`}</div>
-          ${r.drifted.includes(c.name) ? `<p class="faint xs">book.yaml describes this character differently; the locked look is used.</p>` : ""}
-          ${c.source_book ? `<span class="faint xs">from ${esc(c.source_book)}</span>` : ""}</div></div>`).join("")}</div></div>`;
+  draw();
 }
 
 async function stepArt(host, b, slug) {
-  const p = await loadPlan(slug);
+  let p = await loadPlan(slug);
   if (p.error) { host.innerHTML = stepHead("Art & build", "") + note("err", `${esc(p.error)}<br><a href="#/book/${slug}/manuscript">Fix the manuscript</a>`); return; }
-  let done = p.slots.filter((s) => s.has_art).length;
-  const chars = p.slots.filter((s) => s.kind === "character").length;
-  const real = b.last_build === "real";
-  host.innerHTML = stepHead("Art & build", "Try the look first, then illustrate everything and build the print files.") + `
+  const ctx = { p, review: new Map(), v: Date.now(), setPlan: (np) => { p = ctx.p = np; $$(".est").forEach((e) => (e.textContent = money(np.estimate_usd))); drawSteps(); } };
+  let built = b.last_build, preflight = null, running = false, tab = null, pilotN = 3;
+  const chars = () => p.slots.filter((s) => s.kind === "character").length;
+  const done = () => p.slots.filter((s) => s.has_art).length;
+  const missing = () => p.slots.filter((s) => !s.has_art);
+  const missingCost = () => missing().reduce((a, s) => a + s.cost_usd, 0);
+  // the optional pilot: character sheets, the front cover and the first pages, to check the look cheaply
+  const pilotSlots = () => [...p.slots.filter((s) => s.kind === "character" || s.id === "cover-front"), ...p.slots.filter(isPageSlot).slice(0, pilotN)];
+  const pilotCost = () => pilotSlots().filter((s) => !s.has_art).reduce((a, s) => a + s.cost_usd, 0);
+  const auto = () => (missing().length ? "art" : "build");
+
+  host.innerHTML = stepHead("Art & build", "Draw the illustrations, then build the print files.",
+    `<div class="art-sum"><b class="num">${p.slots.length}</b> illustrations<br><span class="faint">~<span class="est">${money(p.estimate_usd)}</span> in total</span></div>`) + `
     <div class="stack">
-      <div class="stats">
-        <div class="stat"><div class="k">Pages</div><div class="v">${real && b.pages ? b.pages : "–"}</div><div class="s">${real && b.pages ? "incl. front matter" : "known after the build"}</div></div>
-        <div class="stat"><div class="k">Illustrations</div><div class="v">${p.slots.length}</div><div class="s">incl. character sheets</div></div>
-        <div class="stat"><div class="k">Estimated art cost</div><div class="v est">${money(p.estimate_usd)}</div><div class="s">each image generated once</div></div>
-      </div>
-      <div class="phases">
-        <div class="phase"><span class="k">${icon("eye")}Step 1 · Pilot</span><h3>Test the look</h3>
-          <p>Character sheets, the cover and the first few pages. Check them before you pay for everything.</p>
-          <div class="row"><input class="input" id="pp" type="number" min="1" max="10" value="3" style="width:72px" aria-label="Pilot pages"><span class="muted small">pages</span>
-            <button class="btn" id="pilot" style="margin-left:auto">Run pilot</button></div></div>
-        <div class="phase"><span class="k">${icon("layers")}Step 2 · All art</span><h3 id="done">${done} of ${p.slots.length} images</h3>
-          <p>About <b class="est">${money(p.estimate_usd)}</b> for everything. Each image is generated once and never redrawn unless you press Redo. Images you already have are free.</p>
-          <button class="btn primary" id="all">${icon("sparkle")}Generate all art</button></div>
-        <div class="phase"><span class="k">${icon("file")}Step 3 · Build</span><h3>Print files</h3>
-          <p>Lays out interior.pdf and cover.pdf with the real art and runs KDP preflight.</p>
-          <button class="btn" id="build" disabled>Build &amp; preflight</button>
-          <p class="faint xs" id="build-hint"></p></div>
-      </div>
+      <ol class="artflow" id="flow" role="tablist" aria-label="Art steps"></ol>
       ${lintHtml(slug, p.lint)}
       ${jobPanel("Working…")}
-      <div id="pf"></div>
-      <div id="viewer"></div>
-      <div class="card" id="charcard" hidden></div>
-      <div class="card" id="reviewcard" hidden></div>
-      ${structureCard(p.structure, slug)}
-      <div class="card"><div class="card-h"><div><h3>Illustrations</h3><p>All at <b>${esc(p.quality)}</b> (~${money(p.base_cost_usd)} each). Switch on <b>High</b> for images that deserve it (~${money(p.high_cost_usd)} each).</p></div>
-          <span class="faint small">${esc(p.model)}</span></div>
-        <div class="card-b table-wrap" id="slots">${slotTable(p)}</div>
-        <div class="card-f"><span class="faint small">Cached images are never paid for twice.</span></div></div>
+      <div class="stack" id="panel"></div>
     </div>`;
-  const jobButtons = () => ["#pilot", "#all", "#build", "#pp"].map((q) => $(q)).filter(Boolean);
+
+  const steps = () => {
+    const left = missing().length, pf = built === "real" && preflight;
+    return [
+      { k: "art", n: 1, t: "Illustrations", done: !left, s: `${done()} of ${p.slots.length} drawn` },
+      { k: "build", n: 2, t: "Print files", done: !!pf?.ok, locked: left > 0,
+        s: left ? `Waiting for ${left} image${left > 1 ? "s" : ""}` : pf ? (pf.ok ? "Preflight passed" : "Preflight failed") : built === "mock" ? "Placeholder build only" : "Ready to build" },
+    ];
+  };
+  function drawSteps() {
+    const list = steps();
+    $("#flow").innerHTML = list.map((x) => `<li class="${x.done ? "done" : ""} ${x.k === tab ? "current" : ""} ${x.locked ? "locked" : ""}">
+      <button type="button" role="tab" aria-selected="${x.k === tab}" data-tab="${x.k}">
+        <span class="dot">${x.done ? icon("check") : x.n}</span>
+        <span class="tx"><span class="k">Step ${x.n}</span><b>${x.t}</b><span class="s">${esc(x.s)}</span></span></button></li>`).join("");
+    $$("[data-tab]", $("#flow")).forEach((btn) => (btn.onclick = () => show(btn.dataset.tab)));
+  }
+  const show = (k) => { tab = k; drawSteps(); drawPanel(); };
+  const next = (k, label) => `<button class="btn primary" data-go="${k}">${label}${icon("arrow")}</button>`;
+  const actionCard = (title, body, actions, extra = "") => `<div class="card act"><div class="act-b"><h3>${title}</h3><p>${body}</p></div><div class="act-a">${actions}</div>${extra}</div>`;
+
+  function drawPanel() {
+    const panel = $("#panel");
+    const left = missing().length;
+    if (tab === "art") {
+      const pct = Math.round((done() / p.slots.length) * 100);
+      // optional: try the look on a few pages before paying for the rest (only worth it while pages are missing)
+      const pilotLeft = pilotSlots().some((s) => !s.has_art);
+      const pilot = left && pilotLeft ? `<div class="act-opt"><span class="badge plain">Optional</span>
+          <span class="small">Check the look first: characters, cover and the first</span>
+          <input class="input num" id="pp" type="number" min="1" max="10" value="${pilotN}" aria-label="Pages to try">
+          <span class="small">pages</span><span class="faint small" id="pp-cost">~${money(pilotCost())}</span>
+          <button class="btn sm" id="pilot">${icon("eye")}Try these first</button></div>` : "";
+      panel.innerHTML = actionCard(left ? "Draw the illustrations" : "Every illustration is drawn",
+        `${left ? `${left} image${left > 1 ? "s" : ""} left, about <b>${money(missingCost())}</b>. ` : ""}All at <b>${esc(p.quality)}</b> quality (~${money(p.base_cost_usd)} each). Each image is generated once and only redrawn when you press Redo.
+         <span class="act-p"><span class="progress ${left ? "" : "done"}"><i style="width:${Math.max(pct, 2)}%"></i></span><span class="num small">${done()} / ${p.slots.length}</span></span>`,
+        left ? `<button class="btn primary" id="all">${icon("sparkle")}Generate ${left === p.slots.length ? "all art" : `${left} missing`}</button>`
+          : next("build", "Next: print files"), pilot) + `
+        <div class="card gallery" id="gal"></div>
+        ${structureCard(p.structure, slug)}`;
+      if (pilot) {
+        $("#pp").oninput = (e) => { pilotN = Math.max(1, Math.min(10, +e.target.value || 1)); $("#pp-cost").textContent = `~${money(pilotCost())}`; };
+        $("#pilot").onclick = async (e) => {
+          const btn = e.currentTarget;
+          if (await cost("Try the look first?", `Character sheets, the front cover and the first ${pilotN} page${pilotN > 1 ? "s" : ""}: about <b>${money(pilotCost())}</b>.`))
+            run(btn, "pilot", { pages: pilotN }, "Generating pilot…", chars() + 1 + pilotN);
+        };
+      }
+      artGallery($("#gal"), slug, ctx, { slots: p.slots.map((s) => ({ ...s })), title: "Illustrations",
+        sub: `Click an image to inspect it. Switch on <b>High quality</b> for images that deserve it. <span class="faint">${esc(p.model)}</span>` });
+      $("#all")?.addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        if (await cost("Generate all illustrations?", `${left} missing image${left > 1 ? "s" : ""}, about <b>${money(missingCost())}</b>.`))
+          run(btn, "art", {}, "Generating art…", p.slots.length);
+      });
+    } else {
+      panel.innerHTML = (left ? note("info", `Building needs every illustration. ${left} still missing. <a href="#" data-go="art">Go to illustrations</a>`) : "") +
+        actionCard("Build the print files",
+          `Lays out interior.pdf and cover.pdf with the real art and checks them against KDP's rules (trim, bleed, margins, fonts, cover size).
+           ${built === "mock" ? `<br><span class="faint">The last build used placeholder art.</span>` : ""}`,
+          `<button class="btn ${built === "real" ? "" : "primary"}" id="build" ${left ? "disabled" : ""}>${icon("file")}${built === "real" ? "Build again" : "Build &amp; preflight"}</button>
+           ${built === "real" && preflight?.ok ? `<a class="btn primary" href="#/book/${slug}/publish">Download &amp; publish${icon("arrow")}</a>` : ""}`) + `
+        <div id="pf"></div><div id="viewer"></div>`;
+      if (preflight && built === "real") showPreflight(preflight);
+      if (built === "real") spreadViewer($("#viewer"), slug);
+      $("#build").onclick = (e) => run(e.currentTarget, "build", {}, "Building print files…", 0);
+    }
+    $$("[data-go]", panel).forEach((a) => (a.onclick = (e) => { e.preventDefault(); show(a.dataset.go); }));
+    if (running) jobButtons().forEach((x) => (x.disabled = true));
+  }
+
+  const showPreflight = (r) => {
+    const warns = notIgnored(slug, r.warnings, (w) => `pf|${w}`);
+    // a problem that names an image ("p002: lettering too close…") gets its own Redo, the problem as the note
+    const fix = (msg) => {
+      const m = /^([\w-]+):\s*(.*)$/.exec(msg);
+      const s = m && p.slots.find((x) => x.id === m[1]);
+      if (!s) return { text: esc(msg), btn: "" };
+      const why = m[2].replace(/\s*-\s*redo it before uploading\.?$/i, "");
+      return { text: `<b>${esc(slotName(s))}</b> · ${esc(why)}`,
+        btn: `<button class="btn sm pf-redo" data-pfredo="${esc(s.id)}" data-why="${esc(why)}">${icon("refresh")}Redo</button>` };
+    };
+    const line = (cls, ic, msg, extra = "") => { const f = fix(msg); return `<li class="${cls}">${icon(ic)}<span>${f.text}</span>${f.btn}${extra}</li>`; };
+    $("#pf").innerHTML = `<div class="card"><div class="card-h"><h3>Preflight</h3>${r.ok ? `<span class="badge ok">Passed</span>` : `<span class="badge err">Failed</span>`}</div>
+      <div class="card-b"><ul class="checklist">
+        ${r.errors.map((e) => line("e", "x", e)).join("")}
+        ${warns.map((w) => line("w", "alert", w, ignoreBtn(slug, `pf|${w}`))).join("")}
+        ${r.ok ? `<li class="o">${icon("check")}<span>${r.pages} pages · ${esc(r.trim)} · fonts embedded · bleed, margins and cover size match KDP</span></li>` : ""}</ul>
+        ${r.errors.some((e) => fix(e).btn) ? `<p class="faint xs" style="margin-top:8px">After redrawing, press Build again to check the new images.</p>` : ""}</div></div>`;
+    $$("[data-pfredo]", $("#pf")).forEach((btn) => (btn.onclick = () => ctx.redo(btn.dataset.pfredo, btn, btn.dataset.why)));
+  };
+  const loadReview = async () => {
+    const r = await api("GET", `/api/books/${slug}/review`).catch(() => ({ slots: [] }));
+    ctx.review = new Map(r.slots.map((s) => [s.id, s]));
+    ctx.v = Date.now();
+  };
+  const loadPreflight = async () => {
+    preflight = await api("GET", `/api/books/${slug}/build/preflight.json`).catch(() => null);
+  };
+  const refresh = async () => {
+    const np = await loadPlan(slug);
+    if (!np.error) p = ctx.p = np;
+    await loadReview();
+  };
+
+  const jobButtons = () => [...["#pilot", "#all", "#build", "#pp"].map((q) => $(q)).filter(Boolean), ...$$("[data-redo], [data-pfredo]")];
   const follow = async (job, kind, label, total) => {
-    jobButtons().forEach((b) => (b.disabled = true));
+    running = true; jobButtons().forEach((x) => (x.disabled = true));
     try {
       const j = await watchJob(job, label, total);
-      if (j.status !== "done") { toast("The job stopped. See the log.", true); }
-      if (kind !== "build") { await characterCard($("#charcard"), slug); await reviewGrid($("#reviewcard"), slug, actions); await refreshDone(); }
-      if (j.result?.preflight) showPreflight(j.result.preflight);
-      if (kind === "build" && j.status === "done") await spreadViewer($("#viewer"), slug);
+      if (j.status !== "done") toast("The job stopped. See the log.", true);
+      if (kind === "build" && j.status === "done") built = "real";
+      if (j.result?.preflight) preflight = j.result.preflight;
+      // reload the plan so the new images show; retry once, since a failed reload would leave the old picture
+      for (let i = 0; i < 3; i++) {
+        try { const np = await loadPlan(slug); if (np.error) throw new Error(np.error); p = ctx.p = np; await loadReview(); break; }
+        catch { await new Promise((r) => setTimeout(r, 800)); }
+      }
       if (j.status === "done") toast(`${label.replace(/…$/, "")}: done`);
       return j;
     } finally {
-      if (host.isConnected) { jobButtons().forEach((b) => (b.disabled = false)); syncBuild(); }
+      running = false;
+      if (host.isConnected) { drawSteps(); drawPanel(); }
     }
   };
   const run = async (btn, kind, body, label, total) => busy(btn, label, async () => {
     const { job } = await api("POST", `/api/books/${slug}/jobs/${kind}`, { ...body, force: !activeLint(slug, p.lint).length });
     return follow(job, kind, label, total);
   });
-  const showPreflight = (r) => {
-    $("#pf").innerHTML = `<div class="card"><div class="card-h"><h3>Preflight</h3>${r.ok ? `<span class="badge ok">Passed</span>` : `<span class="badge err">Failed</span>`}</div>
-      <div class="card-b stack"><ul class="checklist">
-        ${r.errors.map((e) => `<li class="e">${icon("x")}<span>${esc(e)}</span></li>`).join("")}
-        ${notIgnored(slug, r.warnings, (w) => `pf|${w}`).map((w) => `<li class="w">${icon("alert")}<span>${esc(w)}</span>${ignoreBtn(slug, `pf|${w}`)}</li>`).join("")}
-        ${r.ok ? `<li class="o">${icon("check")}<span>${r.pages} pages · ${esc(r.trim)} · fonts embedded · bleed, margins and cover size match KDP</span></li>` : ""}</ul>
-        ${r.ok ? `<div><a class="btn primary" href="#/book/${slug}/publish">Download &amp; publish${icon("arrow")}</a></div>` : ""}</div></div>`;
-  };
-  // the interior needs every image, so Build stays locked until Step 2 is complete
-  const syncBuild = () => {
-    const left = p.slots.length - done;
-    $("#done").textContent = `${done} of ${p.slots.length} images`;
-    $("#build").disabled = left > 0;
-    $("#build-hint").textContent = left ? `${left} image${left > 1 ? "s" : ""} still missing. Run Generate all art first.` : "";
-  };
-  const refreshDone = async () => {
-    const np = await loadPlan(slug);
-    if (np.error) return;
-    done = np.slots.filter((s) => s.has_art).length;
-    syncBuild();
-  };
   const cost = (title, body) => modal({ title, body: `${body}<br><br>This uses the OpenAI image API and costs real money.`, confirm: "Generate" });
-  const actions = {
-    redo: async (id, btn) => {
-      const slot = p.slots.find((s) => s.id === id);
-      const isHigh = slot?.quality === "high";
-      const v = await modal({ title: `Redo ${id}`, confirm: "Redo image",
-        body: `Draws this image once more with your correction: about ${money(isHigh ? p.high_cost_usd : p.base_cost_usd)}.`,
-        fields: `<div class="field"><label for="m-note">What should change?</label>
-          <textarea class="input" id="m-note" name="note" rows="3" required placeholder="Pip smaller, facing left, softer light. Spell 'wiggles' with two g's."></textarea></div>
-          <label class="check"><input type="checkbox" name="high" ${isHigh ? "checked" : ""}> High quality (~${money(p.high_cost_usd)} instead of ~${money(p.base_cost_usd)})</label>` });
-      if (!v) return;
-      if (!!v.high !== isHigh) await api("PUT", `/api/books/${slug}/high`, { slots: [id], on: !!v.high });
-      run(btn, "regen", { slots: [id], note: (v.note || "").trim() || null }, `Regenerating ${id}…`, 1);
-    },
+  ctx.redo = async (id, btn, prefill = "") => {
+    const slot = p.slots.find((s) => s.id === id);
+    const isHigh = slot?.quality === "high";
+    const v = await modal({ title: `Redo ${slotName({ id })}`, confirm: "Redo image",
+      body: `Draws this image once more with your correction: about ${money(isHigh ? p.high_cost_usd : p.base_cost_usd)}.`,
+      fields: `<div class="field"><label for="m-note">What should change?</label>
+        <textarea class="input" id="m-note" name="note" rows="3" required placeholder="Pip smaller, facing left, softer light. Spell 'wiggles' with two g's.">${esc(prefill)}</textarea></div>
+        <label class="check"><input type="checkbox" name="high" ${isHigh ? "checked" : ""}> High quality (~${money(p.high_cost_usd)} instead of ~${money(p.base_cost_usd)})</label>` });
+    if (!v) return;
+    if (!!v.high !== isHigh) p = ctx.p = await api("PUT", `/api/books/${slug}/high`, { slots: [id], on: !!v.high });
+    run(btn, "regen", { slots: [id], note: (v.note || "").trim() || null }, `Redrawing ${slotName({ id })}…`, 1);
   };
-  // grab the button before awaiting the modal: e.currentTarget is null once the handler yields
-  $("#pilot").onclick = async (e) => {
-    const btn = e.currentTarget, n = +$("#pp").value;
-    if (await cost("Run the pilot?", `Character sheets, the cover and ${n} page${n > 1 ? "s" : ""}.`))
-      run(btn, "pilot", { pages: n }, "Generating pilot…", chars + 1 + n);
-  };
-  $("#all").onclick = async (e) => {
-    const btn = e.currentTarget;
-    if (await cost("Generate all illustrations?", `${p.slots.length - done} missing images, about <b>${money(p.slots.filter((s) => !s.has_art).reduce((a, s) => a + s.cost_usd, 0))}</b>.`))
-      run(btn, "art", {}, "Generating art…", p.slots.length);
-  };
-  $("#build").onclick = (e) => run(e.currentTarget, "build", {}, "Building print files…", 0);
-  syncBuild();
-  wireSlotTable(slug, (np) => (p.slots = np.slots));
-  if (real) spreadViewer($("#viewer"), slug);
-  characterCard($("#charcard"), slug);
-  reviewGrid($("#reviewcard"), slug, actions);
-  // a job still running on the server (e.g. after a page refresh): pick it up where it is
+
+  await Promise.all([loadReview(), built === "real" ? loadPreflight() : null]);
+  if (!host.isConnected) return;
+  // a job still running on the server (e.g. after a page refresh) opens the step it belongs to
+  tab = { pilot: "art", art: "art", regen: "art", build: "build" }[b.job_kind] || auto();
+  drawSteps(); drawPanel();
   if (b.job) follow(b.job, b.job_kind, `${JOB_LABELS[b.job_kind] || "Working"}…`, 0);
 }
+
+// Download formats on the Publish step: [file, title, kind, what it's for, icon]
+const FORMATS = {
+  print: { title: "Print", sub: "The two files Amazon KDP asks for when you publish a paperback.", items: [
+    ["interior.pdf", "Interior", "PDF · print", "Every page with bleed, at print resolution.", "book"],
+    ["cover.pdf", "Cover", "PDF · print", "Back, spine and front in one wraparound sheet.", "layers"]] },
+  screen: { title: "Read on screen", sub: "Trimmed to the page edge, padding pages left out, small enough to email.", items: [
+    ["reading.pdf", "Reading PDF", "PDF · pages", "Cover, then one page after another. For tablets, email or selling as a download.", "file"],
+    ["spreads.pdf", "Spreads PDF", "PDF · spreads", "Two pages side by side, as the open book looks. For reading on a laptop or a TV.", "eye"]] },
+  images: { title: "Images", sub: "For your shop page, social posts and the eBook cover.", items: [
+    ["cover.jpg", "Front cover", "JPG · 300 dpi", "The front cover alone, full size. Use it as the Kindle cover, on your website or in ads.", "image"],
+    ["pages.zip", "All pages", "ZIP of JPGs", "The cover and every page as an image, numbered in reading order.", "grid"]] },
+};
 
 async function stepPublish(host, b, slug) {
   const built = b.last_build === "real";
@@ -1609,38 +1744,83 @@ async function stepPublish(host, b, slug) {
   let paper = "premium_color", trim = "8.5x8.5";
   const m = b.yaml?.match(/^paper:\s*(\S+)/m); if (m) paper = m[1];
   const t = b.yaml?.match(/^trim:\s*['"]?([\d.x]+)/m); if (t) trim = t[1];
-  const file = (name, label, sub) => `<a class="file ${b.files?.[name] ? "" : "off"}" href="/api/books/${slug}/build/${name}" download>
-    <span class="fi">${icon("file")}</span><span><b>${label}</b><span>${b.files?.[name] ? `${bytes(b.files[name])} · ${sub}` : "not built"}</span></span></a>`;
-  host.innerHTML = stepHead("Publish", "Your print files, the Amazon listing and what you'll earn.") + `
+  const ready = !!b.files?.["interior.pdf"];
+  const fmt = ([name, title, kind, what, ic]) => {
+    const print = name.endsWith(".pdf") && FORMATS.print.items.some(([n]) => n === name);
+    const href = print ? `/api/books/${slug}/build/${name}` : `/api/books/${slug}/export/${name}`;
+    const size = print ? b.files?.[name] : b.exports?.[name];
+    const on = print ? !!size : ready && (name !== "cover.jpg" || !!b.files?.["cover.pdf"]);
+    return `<div class="fmt ${on ? "" : "off"}">
+      <div class="fmt-top"><span class="fmt-ic">${icon(ic)}</span><span><b>${title}</b><span class="fmt-kind">${kind}</span></span></div>
+      <p>${what}</p>
+      <div class="fmt-f"><span class="faint xs num">${on ? (size ? bytes(size) : "") : "not built"}</span>
+        <a class="btn sm" ${on ? `href="${href}" download` : `aria-disabled="true"`}>${icon("download")}Download</a></div></div>`;
+  };
+  const group = (key) => { const g = FORMATS[key]; return `<section class="pub-group">
+      <div class="pub-gh"><h3>${g.title}</h3><p>${g.sub}</p></div>
+      <div class="fmts">${g.items.map(fmt).join("")}</div>
+      
+    </section>`; };
+
+  host.innerHTML = stepHead("Publish", "Download the book in the format you need, or make the same book in another language.") + `
     <div class="stack">
-      ${built ? note("ok", `Ready for KDP. In KDP choose <b>${esc(trim)}</b>, <b>${esc(PAPERS[paper] || paper)}</b> and <b>Bleed</b>.`)
-        : note("warn", `${b.last_build === "mock" ? "These files use placeholder art. Don't upload them." : "Nothing built yet."} <a href="#/book/${slug}/art">Go to Art &amp; build</a>`)}
+      ${built ? (b.preflight?.ok ? note("ok", "Ready to publish. Every file below comes from the same finished book.") : "")
+        : note("warn", `${b.last_build === "mock" ? "These files use placeholder art. Don't upload or share them." : "Nothing built yet."} <a href="#/book/${slug}/art">Go to Art &amp; build</a>`)}
       ${(() => {
         const pf = b.preflight, warns = built && pf ? notIgnored(slug, pf.warnings, (w) => `pf|${w}`) : [];
         if (!built || !pf || !(pf.errors.length || warns.length)) return "";
         return `<div data-ignorable>${note(pf.errors.length ? "err" : "warn", `<b>Check before uploading</b><ul>${pf.errors.map((e) => `<li>${esc(e)}</li>`).join("")}${
           warns.map((w) => `<li>${esc(w)} ${ignoreBtn(slug, `pf|${w}`)}</li>`).join("")}</ul>`)}</div>`;
       })()}
-      <div class="files">
-        ${file("interior.pdf", "interior.pdf", `${b.pages || "?"} pages`)}
-        ${file("cover.pdf", "cover.pdf", "wraparound")}
-        <a class="file" href="/api/books/${slug}/download.zip"><span class="fi">${icon("download")}</span><span><b>Everything</b><span>.zip · PDFs, listing, book.yaml</span></span></a>
+      <div class="split pub">
+        <div class="stack">
+          ${group("print")}${group("screen")}${group("images")}
+          <a class="file everything" href="/api/books/${slug}/download.zip"><span class="fi">${icon("download")}</span>
+            <span><b>Everything in one .zip</b><span>Print PDFs, Amazon listing and book.yaml</span></span>${icon("arrow")}</a>
+          <div class="card"><div class="card-h"><div><h3>Amazon listing</h3><p>Description, keywords, categories and AI disclosure, ready to paste into KDP.</p></div>
+            <button class="btn ${listing ? "" : "primary"} sm" id="gen">${icon("sparkle")}${listing ? "Regenerate" : "Draft with Claude"}</button></div>
+            <div class="card-b" id="listing">${listing ? listingHtml(listing) : `<p class="muted">Claude reads the finished book and drafts every field KDP asks for.</p>`}</div></div>
+        </div>
+        <aside class="sticky">${editionsCard(b, slug)}</aside>
       </div>
-      <div class="card"><div class="card-h"><div><h3>Amazon listing</h3><p>Description, keywords, categories, price and AI disclosure.</p></div>
-        <button class="btn ${listing ? "" : "primary"} sm" id="gen">${icon("sparkle")}${listing ? "Regenerate" : "Draft with Claude"}</button></div>
-        <div class="card-b" id="listing">${listing ? listingHtml(listing) : `<p class="muted">Claude reads the finished book and drafts every field KDP asks for.</p>`}</div></div>
-      <div class="card"><div class="card-h"><h3>Royalty</h3><a class="small" href="#/guide/pricing">Pricing guide</a></div><div class="card-b" id="calc"></div></div>
-      ${built ? `<div class="card"><div class="card-h"><div><h3>Another language</h3><p>A copy of this book with the same pictures and translated text, ready to publish as its own edition.</p></div>
-        <button class="btn sm" id="tr">${icon("globe")}Translate</button></div></div>` : ""}
     </div>`;
-  if (built) $("#tr").onclick = (e) => translateBook(slug, b.title, e.currentTarget);
-  calculator($("#calc"), { pages: b.pages || 32, paper, trim, price: listing?.suggested_price_usd });
+  wireEditions(b, slug);
   wireCopy();
   $("#gen").onclick = (e) => busy(e.currentTarget, "Writing…", async () => {
     const st = await api("POST", `/api/books/${slug}/listing`);
     $("#listing").innerHTML = listingHtml(st.listing); wireCopy();
-    calculator($("#calc"), { pages: b.pages || 32, paper, trim, price: st.listing.suggested_price_usd });
   });
+}
+
+// "Same book, another language": the same art, the same text translated, as its own book
+function editionsCard(b, slug) {
+  const ed = b.editions || { translations: [] };
+  // new languages are always made from the original, so a translation can start one as soon as the original is built
+  const built = ed.origin ? ["ready", "preflight failed"].includes(ed.origin.status) : b.last_build === "real";
+  const here = langOf(b.yaml?.match(/^language:\s*['"]?([^'"\n]+)/m)?.[1]);
+  const source = ed.origin || { slug, title: b.title, language: here };
+  const made = new Set([source.language, ...ed.translations.map((e) => e.language)].map((l) => l.toLowerCase()));
+  const row = (e) => `<a class="ed ${e.slug === slug ? "here" : ""}" href="#/book/${e.slug}/${e.status === "ready" ? "publish" : "art"}">
+      <span class="ed-lang">${esc(e.language)}</span><span class="ed-t">${esc(e.title)}</span>
+      ${e.slug === slug ? `<span class="faint xs">this book</span>` : badge(e.status)}</a>`;
+  return `<div class="card tr-card"><div class="card-h"><div><h3>${icon("globe")}Another language</h3></div></div>
+    <div class="card-b stack">
+      <p class="small">The whole book again in another language: <b>the same art</b> and <b>the same text</b>, translated by Claude and laid out as its own book.</p>
+      ${built ? `<div class="stack tight">
+          <span class="label">Translate “${esc(source.title)}” into</span>
+          ${LANGS.some((l) => !made.has(l.toLowerCase())) ? `<div class="tr-langs" id="tr-chips">${LANGS.filter((l) => !made.has(l.toLowerCase()))
+            .map((l) => `<button class="btn" data-lang="${l}">${icon("globe")}${LANG_NATIVE[l]}</button>`).join("")}</div>`
+            : `<p class="muted small">This book is already in all ${LANGS.length} languages.</p>`}
+          <span class="faint xs">Pictures with no words in them are reused as they are. Only pictures with the words drawn into them are drawn again.</span>
+        </div>` : `<p class="muted small">Finish the art and build this book first. Then you can translate it.</p>`}
+      ${ed.origin || ed.translations.length ? `<div class="stack tight"><span class="label">Editions</span>
+        <div class="eds">${row({ ...source, status: source.status || b.status })}${ed.translations.map(row).join("")}</div></div>` : ""}
+    </div></div>`;
+}
+
+function wireEditions(b, slug) {
+  const source = b.editions?.origin?.slug || slug;
+  $$("#tr-chips [data-lang]").forEach((c) => (c.onclick = () => runTranslate(source, c.dataset.lang, c)));
 }
 
 function wireCopy() {
@@ -1657,7 +1837,6 @@ function listingHtml(l) {
         <div class="chips">${l.keywords.map((k) => `<span class="chip" style="cursor:default">${esc(k)}</span>`).join("")}</div></div>
       <dl class="kv"><dt>Categories</dt><dd>${l.categories.map(esc).join("<br>")}</dd>
         <dt>Reading age</dt><dd>${esc(l.reading_age)}</dd>
-        ${l.suggested_price_usd ? `<dt>Suggested price</dt><dd><b>${money(l.suggested_price_usd)}</b> <span class="muted">${esc(l.price_reasoning || "")}</span></dd>` : ""}
         <dt>AI disclosure</dt><dd>${esc(l.ai_disclosure)}</dd></dl>
     </div></div>`;
 }

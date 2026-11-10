@@ -7,7 +7,7 @@ from .. import kdp
 from ..plan import needs_text_frame, picture_layout, text_space
 from ..project import Project
 from . import front_matter as fm
-from .base import FOLIO_SPACE, Sheet, frame_box, para_html, text_band
+from .base import FOLIO_SPACE, Sheet, frame_box, frame_panel, para_html, text_band
 from .geometry import PICTURE_SPOT_ASPECT, SPLIT_IMAGE_FRACTION, fit_box
 
 Draw = Callable[[Sheet, kdp.Interior], None]
@@ -100,8 +100,12 @@ def _text_only(sheet, interior, src, html, foot=0.0):
 def _framed_text(sheet, interior, frame, html):
     sheet.image(frame, (0, 0, interior.page_w, interior.page_h))
     x, y, w, h = safe = interior.safe_box(sheet.page_no)
-    fx, fy, fw, fh = frame_box(interior, sheet.page_no)
-    sheet.text(html, (fx, fy, fw, fh), sheet.theme.size * 1.1, safe=safe)
+    box, panel = frame_box(interior, sheet.page_no, frame)
+    if panel:
+        sheet.panel(frame_panel(box, interior))
+    sheet.text(html, box, sheet.theme.size * 1.1, safe=safe)
+    if not panel:  # preflight checks the words really sit on the art's empty paper
+        sheet.records["text"][-1]["art"] = frame.name
 
 
 def _spread_half(sheet, interior, src, html, space, half):

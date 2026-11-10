@@ -45,8 +45,8 @@ def test_pages_get_character_and_style_refs(project, monkeypatch):
 
 
 def test_failed_review_is_flagged_never_redrawn(project, monkeypatch):
-    bad = {"score": 4, "has_text": True, "character_issues": [], "anatomy_issues": [], "composition_issues": [],
-           "style_issues": [], "fix": "Remove the writing on the signpost."}
+    bad = {"score": 4, "has_text": True, "text_errors": ["'wigles' should be 'wiggles'"], "character_issues": [],
+           "anatomy_issues": [], "composition_issues": [], "style_issues": [], "fix": "Spell 'wiggles' with two g's."}
     calls = []
     monkeypatch.setattr(generate, "get_reviewer", lambda s: type("R", (), {"review": lambda *a: calls.append(1) or bad})())
     failures = generate.run(project, only={"p002"})
@@ -67,9 +67,14 @@ def test_review_failure_is_reported_not_fatal(project, monkeypatch):
     bad = {"score": 3, "has_text": False, "character_issues": ["Pip has no scarf"], "anatomy_issues": [],
            "composition_issues": [], "style_issues": [], "fix": "Give Pip his mustard scarf."}
     monkeypatch.setattr(generate, "get_reviewer", lambda s: type("R", (), {"review": lambda *a: bad})())
-    failures = generate.run(project, only={"p002"})
-    assert "Pip has no scarf" in failures["p002"]
-    assert project.art_path("p002").exists()  # best attempt still placed so the book can build
+    assert generate.run(project, only={"p002"}) == {}  # a low score or a style nit is not a serious problem
+    assert project.art_path("p002").exists()
+    failures = generate.run(project, only={"p002"}, bump={"p002"})
+    assert "p002" not in failures
+    bad["text_errors"] = ["'Wilowmere' should be 'Willowmere'"]  # misspelled lettering is
+    failures = generate.run(project, only={"p002"}, bump={"p002"})
+    assert "Wilowmere" in failures["p002"]
+    assert project.art_path("p002").exists()  # the image is still placed so the book can build
     assert "p002" in (project.build / "review.html").read_text()
 
 

@@ -10,6 +10,7 @@ from reportlab.lib.units import inch
 
 from .. import kdp
 from ..spec import Book
+from ..words import word
 from .base import Sheet, para_html
 from .geometry import fit_box
 
@@ -53,11 +54,7 @@ def copyright_page(sheet: Sheet, interior: kdp.Interior, book: Book) -> None:
     sheet.paper()
     x, y, w, h = interior.safe_box(sheet.page_no)
     year = datetime.date.today().year
-    lines = book.front_matter.copyright or (
-        f"Text copyright © {year} {book.author}\nAll rights reserved.\n\n"
-        "No part of this book may be reproduced in any form without written permission "
-        "from the author, except for brief quotations in reviews."
-    )
+    lines = book.front_matter.copyright or word(book, "copyright", year=year, author=book.author)
     sheet.text(para_html(lines), (x, y, w * 0.85, h * 0.4), 8.5, valign="bottom", align=0)
 
 
@@ -74,7 +71,7 @@ def the_end_page(sheet: Sheet, interior: kdp.Interior, book: Book, art: Path | N
         return
     sheet.paper()
     x, y, w, h = interior.safe_box(sheet.page_no)
-    box = sheet.text("The End", (x, y + h * 0.42, w, h * 0.2), 40, font=sheet.theme.heading,
+    box = sheet.text(para_html(word(book, "the_end")), (x, y + h * 0.42, w, h * 0.2), 40, font=sheet.theme.heading,
                      align=TA_CENTER, valign="middle")
     _ornament(sheet, x + w / 2, box[1] - 0.25)
 
@@ -82,7 +79,7 @@ def the_end_page(sheet: Sheet, interior: kdp.Interior, book: Book, art: Path | N
 def about_page(sheet: Sheet, interior: kdp.Interior, book: Book) -> None:
     sheet.paper()
     x, y, w, h = interior.safe_box(sheet.page_no)
-    head = sheet.text("About the Author", (x, y + h * 0.62, w, 0.8), 22, font=sheet.theme.heading,
+    head = sheet.text(para_html(word(book, "about_author")), (x, y + h * 0.62, w, 0.8), 22, font=sheet.theme.heading,
                       align=TA_CENTER, valign="bottom")
     sheet.text(para_html(book.about_author or ""), (x + w * 0.08, y + h * 0.15, w * 0.84, head[1] - y - h * 0.15 - 0.3),
                min(sheet.theme.size, 13), valign="top", align=TA_CENTER)

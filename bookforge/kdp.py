@@ -27,7 +27,7 @@ SPINE_FACTOR = {
 # (max page count, gutter/inside margin)
 GUTTER_STEPS = [(150, 0.375), (300, 0.5), (500, 0.625), (700, 0.75), (828, 0.875)]
 
-TRIMS = {"5x8", "5.5x8.5", "6x9", "7x10", "8x10", "8.25x8.25", "8.5x8.5", "8.5x11", "8.25x11", "8.27x11.69"}
+TRIMS = {"5x8", "5.5x8.5", "6x9", "6.14x9.21", "7x10", "8x10", "8.25x8.25", "8.5x8.5", "8.5x11", "8.25x11", "8.27x11.69"}
 
 
 def parse_trim(trim: str) -> tuple[float, float]:

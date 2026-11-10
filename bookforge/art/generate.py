@@ -23,7 +23,7 @@ from ..project import Project
 from ..providers.base import get_provider
 from ..providers.openai_images import MAX_REFS, ModerationBlocked
 from . import prompting
-from .review import get_reviewer, passed
+from .review import get_reviewer
 
 console = Console()
 
@@ -140,10 +140,10 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
         if slot.kind == "character":
             characters.lock(project, by_name[slot.id], project.art_path(slot.id))
         reviews.data.setdefault("_chosen", {})[slot.id] = {"key": key, "attempts": 1, "prompt": prompt_id}
-        if best and not passed(best, settings.min_score, bool(slot.lettering)):
-            failures[slot.id] = f"scored {best['score']} - use Redo with a note: " + \
-                "; ".join(text_problems(best, bool(slot.lettering)) + best["character_issues"] + best["anatomy_issues"])
-        return f"score {best['score']}" if best else "done"
+        # only misspelled or stray lettering is serious enough to flag
+        if best and (problems := serious_problems(best, bool(slot.lettering))):
+            failures[slot.id] = "use Redo with a note: " + "; ".join(problems)
+        return "done"
 
     def tracked(slot: Slot, previous: Path | None = None) -> str:
         progress("start", slot.id, None)
@@ -199,6 +199,20 @@ def text_problems(verdict: dict, lettered: bool) -> list[str]:
     return out
 
 
+def serious_problems(verdict: dict, lettered: bool) -> list[str]:
+    """The faults that really ruin a page: misspelled lettering, or writing in art meant to have none.
+    Everything else the reviewer says (margins, outfits, style) is only a note."""
+    if not lettered:
+        return ["has text"] if verdict.get("has_text") else []
+    return [f"text: {e}" for e in verdict.get("text_errors", [])]
+
+
+def review_notes(verdict: dict, lettered: bool) -> list[str]:
+    """Everything the reviewer said about an image, shown only when the user asks for it."""
+    return text_problems(verdict, lettered) + [i for k in ("character_issues", "anatomy_issues",
+                                               "composition_issues", "style_issues") for i in verdict.get(k, [])]
+
+
 def make_thumb(project: Project, slot_id: str) -> Path:
     """A 720px JPEG of a slot's art for the web UI and review page."""
     thumb = project.build / "thumbs" / f"{slot_id}.jpg"
@@ -223,15 +237,11 @@ def write_review_page(project: Project, slots: list[Slot], reviews: dict, failur
         make_thumb(project, s.id)
         info = chosen.get(s.id, {})
         verdict = reviews.get(info.get("key", ""), {}).get("verdict") or {}
-        issues = text_problems(verdict, bool(s.lettering)) + \
-            [i for k in ("character_issues", "anatomy_issues", "composition_issues", "style_issues")
-             for i in verdict.get(k, [])]
+        issues = serious_problems(verdict, bool(s.lettering)) if verdict else []
         status = "attention" if s.id in failures else "ok"
         cards.append(f"""<article class="card {status}">
 <img src="thumbs/{s.id}.jpg" alt="{s.id}" loading="lazy">
 <div class="meta"><h3>{s.id} <span>{s.kind}</span></h3>
-<p class="score">{'Score ' + str(verdict['score']) + '/10' if verdict else 'not reviewed'}
-{' · ' + str(info.get('attempts', 1)) + ' attempt(s)'}</p>
 {'<p class="warn">' + html.escape(failures[s.id]) + '</p>' if s.id in failures else ''}
 {'<ul>' + ''.join(f'<li>{html.escape(i)}</li>' for i in issues) + '</ul>' if issues else ''}
 <details><summary>Prompt</summary><pre>{html.escape(s.prompt)}</pre></details>
@@ -248,5 +258,5 @@ h1 {{ font-weight:600; }} .grid {{ display:grid; grid-template-columns:repeat(au
 .score {{ color:var(--muted); margin:2px 0 6px; }} .warn {{ color:var(--warn); font-weight:600; }}
 pre {{ white-space:pre-wrap; font-size:12px; }} code {{ font-size:11px; color:var(--muted); word-break:break-all; }}
 </style></head><body><h1>{html.escape(project.book.title)}: art review</h1>
-<p>{len(failures)} image(s) need attention. Green = passed review.</p>
+<p>{len(failures)} image(s) need a fix.</p>
 <div class="grid">{''.join(cards)}</div></body></html>""")

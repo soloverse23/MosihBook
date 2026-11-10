@@ -12,7 +12,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from . import characters, kdp, settings, spec, templates
+from . import characters, kdp, settings, spec, templates, words
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLE_DIR = {"picture_book": "picture-book", "storybook": "storybook", "comic": "comic"}
@@ -40,7 +40,9 @@ Hard rules for book.yaml:
   Every page is `illustration: opener` with a `prompt` (a full-page picture carrying that page's text). Set
   `chapter` on the first page of each chapter and on the first page of each exercise, tip or game section
   (its title is lettered on the picture too). Pages with no prompt only for long reference material
-  (glossary, answer key, word lists): they are typeset inside a generated decorative frame.
+  (glossary, answer key, word lists): they are typeset inside a generated decorative frame. A `reference`
+  page with no prompt gets its own border drawn from its examples, and its words are typeset exactly:
+  a caption line, then a table as `| | col | col |` rows, then a label ending in ":" and `•` examples.
 - The book ENDS with a games section of 3-5 game pages. Be genuinely creative and varied, never a plain quiz:
   invent games that grow out of this story's world, characters and learning goal, for example an acting or
   mime game, a "draw what happens next" page, a make-your-own-ending, a treasure hunt back through the book's
@@ -89,6 +91,12 @@ Hard rules for book.yaml:
     answers to any other game with objectively checkable answers (never the comprehension questions, drawing
     pages or observation).
   Other kinds are illustrated pages as described in the structure.
+- Language: `language` is the book's language ({languages}). Every word a reader sees is written in it, natively
+  and with its own typography (accents and diacritics always, e.g. Romanian ș ț with a comma below; French
+  « guillemets »; German „Anführungszeichen“; Spanish ¡ ¿): title, subtitle, page `text`, `chapter` titles,
+  exercise and game headings (never an English "Your turn!" in a French book), game data, certificate, blurb,
+  dedication, about_author, copyright. Image `prompt`s, `style`, `lettering` and character descriptions stay
+  in English. Character names stay as the brief gives them.
 - trim must be one of: {trims}.
 - Fill `cover_prompt`, `back_cover.blurb` (2-4 enticing sentences), and `front_matter.dedication`.
 """
@@ -111,8 +119,6 @@ LISTING_SCHEMA = {
         "keywords": {"type": "array", "items": {"type": "string"}},
         "categories": {"type": "array", "items": {"type": "string"}},
         "reading_age": {"type": "string"},
-        "suggested_price_usd": {"type": "number"},
-        "price_reasoning": {"type": "string"},
         "ai_disclosure": {"type": "string"},
     },
     "required": ["description", "keywords", "categories", "reading_age", "ai_disclosure"],
@@ -124,7 +130,7 @@ class AuthorError(RuntimeError):
 
 
 def _system(book_type: str) -> str:
-    parts = [RULES.format(trims=", ".join(sorted(kdp.TRIMS)))]
+    parts = [RULES.format(trims=", ".join(sorted(kdp.TRIMS)), languages=", ".join(words.LANGUAGES))]
     if lib := characters.library():
         parts.append("Characters already drawn for earlier books (the writer's character library). When this "
                      "book uses one of them (a series, a returning hero), use exactly this name and copy the "
@@ -323,7 +329,9 @@ async def outline(brief: dict, qs: list[dict], answers: dict, feedback: str = ""
               "(trim, page count and why), ## Page plan (numbered pages, one line each, marked [story], [exercise], "
               "[tip] or [game], with the illustration idea; the games section comes last). When the brief gives a "
               "book structure, the page plan follows it exactly and marks each page with its section kind instead, "
-              "e.g. [story], [coloring], [maze]. Output only the outline.")
+              "e.g. [story], [coloring], [maze]. Write the title options and every page's words in the book's "
+              f"language ({words.canonical(brief.get('language')) or 'English'}); the rest of the outline in the "
+              "language the brief is written in. Output only the outline.")
     if previous:
         prompt += f"\n\nPrevious outline:\n{previous}\n\nRevise it with this feedback: {feedback}"
     return await ask(prompt, _system(BOOK_TYPE), images=images)
@@ -338,7 +346,7 @@ async def write_book(brief: dict, outline_md: str, image_block: dict, refs: str 
     if secs := structure(brief):
         fixed["sections"] = secs
     if brief.get("language"):
-        fixed["language"] = brief["language"]
+        fixed["language"] = words.canonical(brief["language"]) or brief["language"]
     learning = {k: brief["learning"][k] for k in ("topic", "explain", "marking")
                 if not _empty((brief.get("learning") or {}).get(k))}
     return await _validated(prompt, BOOK_TYPE, image_block, images, fixed, learning)
@@ -400,10 +408,10 @@ async def _validated(prompt: str, book_type: str, image_block: dict, images=(), 
 async def listing(book_yaml: str, pages: int | None) -> dict:
     return await ask(
         f"Here is a finished book:\n```yaml\n{book_yaml}```\nInterior page count: {pages or 'unknown'}.\n\n"
-        "Draft its Amazon KDP paperback listing: a description (150-300 words, simple HTML allowed: <b>, <i>, <br>), "
-        "exactly 7 search keyword phrases (no title words, no brand names), 2-3 browse categories as full paths, "
-        "a reading age range, a suggested USD list price with reasoning based on genre norms and print cost, "
-        "and a one-sentence note on what to declare in KDP's AI-generated content question (images are AI-generated; "
+        "Draft its Amazon KDP paperback listing for the Amazon store of the book's language: a description "
+        "(150-300 words, simple HTML allowed: <b>, <i>, <br>) and exactly 7 search keyword phrases (no title words, "
+        "no brand names), both written in the book's language as readers there search, 2-3 browse categories as "
+        "full paths, a reading age range, and a one-sentence note on what to declare in KDP's AI-generated content question (images are AI-generated; "
         "say whether text is AI-generated or AI-assisted based on how it was written with you).",
         _system(yaml.safe_load(book_yaml).get("type", "picture_book")), LISTING_SCHEMA)
 

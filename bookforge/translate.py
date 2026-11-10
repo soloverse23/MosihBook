@@ -70,6 +70,10 @@ def texts(data: dict, observation: dict | None = None) -> dict[str, str]:
                 put(f"pages.{i}.odd_one_out.groups.{j}.items.{k}", item)
         for k in ("title", "name_label", "date_label"):
             put(f"pages.{i}.certificate.{k}", (p.get("certificate") or {}).get(k))
+    # the software's own words: the built-in ones follow the new language by themselves, only the
+    # book's own overrides need translating
+    for k, v in (data.get("words") or {}).items():
+        put(f"words.{k}", v)
     for sid, v in (observation or {}).items():
         for n, item in enumerate(v.get("items", [])):
             put(f"finds.{sid}.{n}", item.get("name"))
@@ -101,6 +105,8 @@ def check(original: dict[str, str], translated: dict[str, str]) -> list[str]:
     errs += [f"{k}: keep exactly {original[k].count('[[')} [[marked]] passage(s)" for k in original
              if k in translated and translated[k].count("[[") != original[k].count("[[")]
     errs += [f"{k}: unbalanced [[ ]] marks" for k in translated if translated[k].count("[[") != translated[k].count("]]")]
+    errs += [f"{k}: keep {ph} exactly as it is" for k in original if k in translated
+             for ph in ("{year}", "{author}") if ph in original[k] and ph not in translated[k]]
     return errs
 
 

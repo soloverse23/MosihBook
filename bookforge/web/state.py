@@ -162,12 +162,15 @@ def summary(slug: str) -> dict:
     d = book_dir(slug)
     state = load_state(slug)
     text = read_yaml(slug)
-    title, book_type = (state.get("brief") or {}).get("title") or slug, (state.get("brief") or {}).get("type")
+    from ..words import canonical
+    brief = state.get("brief") or {}
+    title, book_type, language = brief.get("title") or slug, brief.get("type"), brief.get("language")
     if text:
         try:
             data = yaml.safe_load(text)
             title, book_type = data.get("title", title), data.get("type", book_type)
-        except yaml.YAMLError:
+            language = data.get("language") or language
+        except (yaml.YAMLError, AttributeError):
             pass
     pf = d / "build" / "preflight.json"
     preflight = json.loads(pf.read_text()) if pf.exists() else None
@@ -183,6 +186,7 @@ def summary(slug: str) -> dict:
     proof = d / "build" / "proofs" / "cover.png"
     return {"slug": slug, "title": title, "type": book_type, "step": state.get("step"), "status": status,
             "last_build": built, "cover": proof.exists(), "pages": (preflight or {}).get("pages"),
+            "language": canonical(language) or str(language), "translated_from": state.get("translated_from"),
             "updated": max((p.stat().st_mtime for p in d.glob("*") if p.is_file()), default=0)}
 
 
@@ -194,4 +198,23 @@ def all_books() -> list[dict]:
                 out.append(summary(d.name))
             except KeyError:
                 continue
-    return sorted(out, key=lambda b: -b["updated"])
+    return group_editions(out)
+
+
+def group_editions(books: list[dict]) -> list[dict]:
+    """Newest first, with each translation placed right after the book it was translated from.
+    A translation gets `origin` ({slug, title}); an original that has translations gets `editions` (how many)."""
+    by_slug = {b["slug"]: b for b in books}
+    kids: dict[str, list[dict]] = {}
+    for b in books:
+        if (src := b.get("translated_from")) in by_slug and src != b["slug"]:
+            b["origin"] = {"slug": src, "title": by_slug[src]["title"], "language": by_slug[src]["language"]}
+            kids.setdefault(src, []).append(b)
+    out = []
+    family_updated = lambda b: max([b["updated"], *(k["updated"] for k in kids.get(b["slug"], []))])
+    for b in sorted((b for b in books if "origin" not in b), key=lambda b: -family_updated(b)):
+        out.append(b)
+        if kids.get(b["slug"]):
+            b["editions"] = len(kids[b["slug"]]) + 1
+            out.extend(sorted(kids[b["slug"]], key=lambda k: k["language"]))
+    return out

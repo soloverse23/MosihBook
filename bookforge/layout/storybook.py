@@ -10,11 +10,11 @@ from xml.sax.saxutils import escape
 
 from .. import kdp
 from ..project import Project
-from ..plan import needs_text_frame, split_chapter, text_space
+from ..plan import needs_text_frame, own_border, split_chapter, text_space
 from ..spec import TYPESET_KINDS, Page
 from . import front_matter as fm
-from . import activities
-from .base import FOLIO_SPACE, Sheet, frame_box, marked, para_html, text_band
+from . import activities, shaped, tables
+from .base import FOLIO_SPACE, Sheet, frame_box, frame_panel, marked, para_html, text_band
 from .geometry import ILLUSTRATED_ART_FRACTIONS, STORY_SPOT_ASPECT
 
 
@@ -37,6 +37,8 @@ HEAD_SPACE = 0.34  # inches reserved at the top of the safe area for the running
 
 class Ornament(Flowable):
     """Short rule - dot - rule, centered under chapter titles."""
+    want = 1.6  # inches: a short centred rule needs no more room (see shaped._natural)
+
     def __init__(self, color: str):
         super().__init__()
         self.color = color
@@ -170,6 +172,39 @@ def _finds(project: Project) -> dict[str, list[str]]:
     return {k: find_list(v.get("items", [])) for k, v in data.items()}
 
 
+BACK_SCALES = (1.0, 0.92, 0.85, 0.78, 0.72)
+BACK_KINDS = {"solutions", "copyright", "reference"}  # set as a whole, centred: answers, editorial, lessons
+
+
+def back_matter(sheet: Sheet, book, p: Page, scale: float = 1.0) -> list:
+    """The solutions and editorial pages: centred, with a clear hierarchy instead of indented body text.
+
+    Editorial mentions: the book's title line in the heading face, its other lines quieter below it,
+    each block separated by air. Solutions: the intro line, then one card per game (activities.answers)."""
+    t = sheet.theme
+    intro = sheet.style(t.size * scale, align=TA_CENTER, leading=1.45)
+    intro.spaceAfter = 10 * scale
+    if p.kind == "reference":
+        return tables.learning_page(sheet, p.text, scale)
+    if p.kind == "solutions":
+        out = [Paragraph(para_html(x, sheet.mark_color), intro) for x in p.text.split("\n\n") if x.strip()]
+        return out + activities.answers(sheet, book, scale)
+    title = sheet.style(t.size + 4, font=t.heading, align=TA_CENTER, color=t.accent, leading=1.25)
+    title.spaceAfter = 10
+    line = sheet.style(t.size - 0.5, align=TA_CENTER, leading=1.5)
+    line.spaceAfter = 0
+    out = []
+    for k, block in enumerate(x for x in p.text.split("\n\n") if x.strip()):
+        lines = [x.strip() for x in block.strip().split("\n") if x.strip()]
+        if k:
+            out.append(Spacer(1, 12))
+        if k == 0 and lines:
+            out.append(Paragraph(marked(lines[0]), title))
+            lines = lines[1:]
+        out += [Paragraph(marked(x), line) for x in lines]
+    return out
+
+
 def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
     book = project.book
     t = sheet.theme
@@ -189,20 +224,26 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
 
     def text_box():
         if frame_art:
-            return frame_box(interior, sheet.page_no)
+            return frame_box(interior, sheet.page_no, frame_art)[0]
         x, y, w, h = interior.safe_box(sheet.page_no)
         return x, y + FOLIO_SPACE, w, h - FOLIO_SPACE - HEAD_SPACE
 
     def ensure_frame():
         if state["frame"] is None:
+            record = {"page": sheet.page_no, "safe": list(interior.safe_box(sheet.page_no))}
             if frame_art:
                 sheet.image(frame_art, (0, 0, interior.page_w, interior.page_h))
+                box, panel = frame_box(interior, sheet.page_no, frame_art)
+                if panel:  # the art left too little room: the words go on paper, never on the drawing
+                    sheet.panel(frame_panel(box, interior))
+                else:  # preflight checks the words really sit on the art's empty paper
+                    record["art"] = frame_art.name
             else:
                 sheet.paper()
-            x, y, w, h = box = text_box()
+                box = text_box()
+            x, y, w, h = box
             state["frame"] = Frame(x * inch, y * inch, w * inch, h * inch, 0, 0, 0, 0)
-            sheet.records["text"].append({"page": sheet.page_no, "box": list(box),
-                                          "safe": list(interior.safe_box(sheet.page_no))})
+            sheet.records["text"].append({**record, "box": [round(v, 4) for v in box]})
 
     def end_page():
         if state["frame"] is not None:
@@ -214,7 +255,12 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
             sheet.new_page()
             state["frame"] = None
 
-    def pour(flowables):
+    def pour(flowables, centred=False):
+        if centred and state["frame"] is None:  # a page that fits sits in the middle of its box
+            _, _, w, h = text_box()
+            total = sum(f.wrap(w * inch, h * inch)[1] + f.getSpaceAfter() for f in flowables)
+            if total < h * inch:
+                flowables = [Spacer(1, (h * inch - total) * 0.42)] + flowables
         while flowables:
             ensure_frame()
             state["frame"].addFromList(flowables, sheet.c)
@@ -225,6 +271,47 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
         end_page()
         draw(sheet, interior, book)
         sheet.new_page()
+
+    def back_page(p, frame_art=frame_art) -> bool:
+        """Solutions / editorial mentions on one page, set inside the calm shape the art left (or the
+        text box on plain paper), shrinking a little if needed. False: it did not fit, pour it instead."""
+        from ..imaging import calm
+        end_page()
+        safe = interior.safe_box(sheet.page_no)
+        pw, ph = interior.page_w, interior.page_h
+        art = None
+        if frame_art:
+            box, panel = frame_box(interior, sheet.page_no, frame_art)
+            shape = calm.rect_shape(box, pw, ph) if panel else calm.shape_of(frame_art, pw, ph)
+            art = None if panel else frame_art.name
+        else:
+            shape = calm.rect_shape(text_box(), pw, ph)
+        head = []
+        if p.chapter:
+            kicker, title = split_chapter(p.chapter)
+            head += ([Paragraph(spaced_caps(kicker), label)] if kicker else []) + \
+                [Paragraph(escape(title), heading), Ornament(t.accent)]
+        # draw on a scratch canvas first: the page is only drawn once a scale fits
+        for scale in BACK_SCALES:
+            flow = head + back_matter(sheet, book, p, scale)
+            probe = Sheet(sheet.path, sheet.page_size, sheet.prepared_dir, sheet.theme)
+            if shaped.place(probe, flow, shape, safe, art=art):
+                break
+        else:
+            return False
+        if p.chapter:
+            state["chapter"] = split_chapter(p.chapter)[1]
+        if frame_art:
+            sheet.image(frame_art, (0, 0, pw, ph))
+            if art is None:
+                sheet.panel(frame_panel(frame_box(interior, sheet.page_no, frame_art)[0], interior))
+        else:
+            sheet.paper()
+        shaped.place(sheet, head + back_matter(sheet, book, p, scale), shape, safe, art=art)
+        if book.page_numbers:
+            sheet.folio(interior, on_art=bool(frame_art))
+        sheet.new_page()
+        return True
 
     sheet.mark_color = book.learning.color if book.learning else None
     if not book.structured:  # a template book's own pages are its whole interior (it has its own copyright page)
@@ -290,18 +377,25 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 sheet.folio(interior, on_art=True)
             sheet.new_page()
             continue
+        if p.kind in BACK_KINDS and not p.prompt and back_page(p, src if own_border(book, p) and src.exists()
+                                                             else frame_art):
+            continue
         if p.chapter:
             end_page()
             ensure_frame()
             state["opening"] = True
             kicker, title = split_chapter(p.chapter)
             state["chapter"] = title
-            flow.append(Spacer(1, text_box()[3] * inch * 0.14))
+            if not frame_art:  # framed pages are centred as a whole instead
+                flow.append(Spacer(1, text_box()[3] * inch * 0.14))
             if kicker:
                 flow.append(Paragraph(spaced_caps(kicker), label))
             flow += [Paragraph(escape(title), heading), Ornament(t.accent)]
         if p.prompt and p.illustration == "spot":
             flow.append(SpotArt(sheet, src, text_box()[2] * 0.72))
+        if p.kind in BACK_KINDS:  # too long for one page: it flows on, same look, at the smallest size
+            pour(flow + back_matter(sheet, book, p, BACK_SCALES[-1]))
+            continue
         for k, para in enumerate(x for x in p.text.split("\n\n") if x.strip()):
             text = marked(para.strip(), sheet.mark_color).replace("\n", "<br/>" if book.structured else " ")
             if k == 0 and p.chapter and p.kind in (None, "story"):
@@ -309,9 +403,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
             else:
                 style = first if (k == 0 and p.prompt and p.illustration == "spot") else body
                 flow.append(Paragraph(text, style))
-        if p.kind == "solutions":
-            flow += activities.answers(sheet, book)
-        pour(flow)
+        pour(flow, centred=bool(frame_art) and book.structured)  # template pages each have their own page
     end_page()
     if book.images.text_in_art and book.characters and not book.structured:
         full_page(lambda s, i, b: fm.the_end_page(s, i, b, project.art_path("the-end")))

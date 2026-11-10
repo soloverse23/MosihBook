@@ -1,6 +1,7 @@
 """Canvas helpers shared by all book types: fonts, themes, images, auto-fitting text."""
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -29,6 +30,34 @@ _FONT_FILES = {
 for _name, _file in _FONT_FILES.items():
     pdfmetrics.registerFont(TTFont(_name, str(FONTS_DIR / _file)))
 
+# a theme font missing a letter the book uses gives way to one that has every letter of our languages
+_FALLBACK = {"body": "Andika", "body_bold": "Andika-Bold", "heading": "Fraunces"}
+_LANGUAGE: ContextVar[str] = ContextVar("book_language", default="English")
+
+
+def missing_glyphs(font: str, text: str) -> set[str]:
+    cmap = pdfmetrics.getFont(font).face.charToGlyph
+    return {c for c in set(text) if not c.isspace() and ord(c) not in cmap}
+
+
+def _reader_text(book: Book) -> str:
+    """Every string in the book (prompts included: extra letters only make the check stricter)."""
+    out = []
+
+    def walk(v):
+        if isinstance(v, str):
+            out.append(v)
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                walk(x)
+    walk(book.model_dump())
+    from ..words import KEYS, word
+    out += [word(book, k) for k in KEYS]
+    return "".join(out)
+
 
 @dataclass
 class Theme:
@@ -40,6 +69,7 @@ class Theme:
     ink: str = "#2B2622"
     paper: str = "#FFFCF5"
     accent: str = "#C8553D"
+    language: str = "English"
 
 
 THEMES = {
@@ -50,9 +80,13 @@ THEMES = {
 
 
 def theme_for(book: Book) -> Theme:
-    t = THEMES[book.type]
+    t = Theme(**{**THEMES[book.type].__dict__, "language": book.language})
     if book.palette:
-        t = Theme(**{**t.__dict__, "accent": book.palette[0]})
+        t.accent = book.palette[0]
+    text = _reader_text(book)
+    for role, fallback in _FALLBACK.items():
+        if missing_glyphs(getattr(t, role), text):
+            setattr(t, role, fallback)
     return t
 
 
@@ -67,8 +101,10 @@ def marked(text: str, color: str | None = None) -> str:
 
 
 def para_html(text: str, color: str | None = None) -> str:
-    """Plain text with blank-line paragraphs and single newlines -> Paragraph markup."""
-    return marked(text.strip(), color).replace("\n", "<br/>")
+    """Plain text with blank-line paragraphs and single newlines -> Paragraph markup, with the typography
+    of the language of the book being drawn (see Sheet)."""
+    from ..words import typeset
+    return marked(typeset(text.strip(), _LANGUAGE.get()), color).replace("\n", "<br/>")
 
 
 @dataclass
@@ -83,6 +119,7 @@ class Sheet:
     records: dict = field(default_factory=lambda: {"images": [], "text": [], "blank": []})
 
     def __post_init__(self):
+        _LANGUAGE.set(self.theme.language)  # para_html sets text in this book's typography
         # the initial font must be one of ours: ReportLab's default Helvetica is never embedded
         self.c = canvas.Canvas(str(self.path), pagesize=(self.page_size[0] * inch, self.page_size[1] * inch),
                                initialFontName=self.theme.body)
@@ -130,6 +167,18 @@ class Sheet:
             textColor=HexColor(color or self.theme.ink), spaceAfter=size * 0.6, **extra,
         )
 
+    def panel(self, box: Box) -> None:
+        """A rounded paper panel with a soft shadow: words laid over art always sit on paper."""
+        x, y, w, h = box
+        c = self.c
+        c.saveState()
+        c.setFillColor(Color(0, 0, 0, alpha=0.14))  # soft drop shadow
+        c.roundRect((x + 0.03) * inch, (y - 0.05) * inch, w * inch, h * inch, 0.24 * inch, stroke=0, fill=1)
+        c.setFillColor(HexColor(self.theme.paper))
+        c.setFillAlpha(0.93)
+        c.roundRect(x * inch, y * inch, w * inch, h * inch, 0.24 * inch, stroke=0, fill=1)
+        c.restoreState()
+
     def fit_paragraph(self, html: str, w: float, max_h: float, size: float, min_size: float = 9,
                       **style_kw) -> tuple[Paragraph, float]:
         """Shrink the font until the text fits; returns (paragraph, height in inches)."""
@@ -155,14 +204,7 @@ class Sheet:
         bh = ph + 2 * pad
         by = {"top": y + h - bh, "bottom": y, "middle": y + (h - bh) / 2}[valign]
         if panel:
-            c = self.c
-            c.saveState()
-            c.setFillColor(Color(0, 0, 0, alpha=0.14))  # soft drop shadow
-            c.roundRect((x + 0.03) * inch, (by - 0.05) * inch, w * inch, bh * inch, 0.24 * inch, stroke=0, fill=1)
-            c.setFillColor(HexColor(self.theme.paper))
-            c.setFillAlpha(0.93)
-            c.roundRect(x * inch, by * inch, w * inch, bh * inch, 0.24 * inch, stroke=0, fill=1)
-            c.restoreState()
+            self.panel((x, by, w, bh))
         p.drawOn(self.c, (x + pad) * inch, (by + pad) * inch)
         drawn = (x, by, w, bh)
         self.records["text"].append({"page": self.page_no, "box": [round(v, 4) for v in drawn],
@@ -222,14 +264,36 @@ def text_band(sheet: Sheet, interior: kdp.Interior, html: str, space: str, size:
                 raise
 
 
-def frame_box(interior: kdp.Interior, page_no: int) -> Box:
-    """The empty centre of the generated `text-frame` art (76% x 80% of the page), within the safe area."""
+MIN_CALM = (0.42, 0.28)  # share of the page width / height a measured empty area needs to carry text
+FRAME_PAD = 0.12         # inches between the words and the measured edge of the drawing
+FOLIO_DISC = 0.4         # the page number's disc in the bottom outer corner of the safe area
+
+
+def frame_box(interior: kdp.Interior, page_no: int, art: Path | None = None) -> tuple[Box, bool]:
+    """Where words go on a page printed over the `text-frame` art, inside the safe area.
+
+    The box is the empty area measured on the art itself (imaging.calm), never a guess: generated frames
+    often reach into the middle (a character, a cloud). Returns (box, panel); panel=True when the art left
+    too little room, and the words then sit on a paper panel over the page's centre, never on the drawing."""
+    from ..imaging.calm import calm_box
     x, y, w, h = interior.safe_box(page_no)
     pw, ph = interior.page_w, interior.page_h
-    cx, cy, cw, ch = pw * 0.12, ph * 0.10, pw * 0.76, ph * 0.80
-    pad = 0.3  # breathing room between the words and the drawn border
-    nx, ny = max(x, cx + pad), max(y, cy + pad)
-    return nx, ny, min(x + w, cx + cw - pad) - nx, min(y + h, cy + ch - pad) - ny
+    if art is not None and art.exists():
+        cx, cy, cw, ch = calm_box(art, pw, ph)
+        nx, ny = max(x, cx + FRAME_PAD), max(y + FOLIO_DISC, cy + FRAME_PAD)
+        box = (nx, ny, min(x + w, cx + cw - FRAME_PAD) - nx, min(y + h, cy + ch - FRAME_PAD) - ny)
+        if box[2] >= pw * MIN_CALM[0] and box[3] >= ph * MIN_CALM[1]:
+            return box, False
+    cx, cy, cw, ch = pw * 0.14, ph * 0.12, pw * 0.72, ph * 0.76
+    pad = 0.35  # inside the paper panel
+    nx, ny = max(x, cx + pad), max(y + FOLIO_DISC, cy + pad)
+    return (nx, ny, min(x + w, cx + cw - pad) - nx, min(y + h, cy + ch - pad) - ny), True
+
+
+def frame_panel(box: Box, interior: kdp.Interior) -> Box:
+    """The paper panel drawn behind a fallback frame box (frame_box returned panel=True)."""
+    x, y, w, h = box
+    return x - 0.3, y - 0.3, w + 0.6, h + 0.6
 
 
 FOLIO_SPACE = 0.32  # inches reserved at the bottom of the safe area for the page number

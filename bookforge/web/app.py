@@ -10,10 +10,9 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import author, characters, kdp, settings, spec, templates
+from .. import author, characters, exports, kdp, settings, spec, templates
 from ..art.lint import lint
-from ..art.generate import text_problems
-from ..art.review import passed
+from ..art.generate import review_notes, serious_problems
 from ..plan import plan
 from ..spec import QUALITY_COST_USD
 from ..project import Project
@@ -22,6 +21,16 @@ from . import auth, jobs, state, updater
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="MosiBooks")
 auth.install(app)
+
+
+@app.middleware("http")
+async def _fresh_static(request, call_next):
+    """The app's own pages, scripts and styles are revalidated on every load, so an update or edit shows
+    at once instead of a cached older app.js."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 def _dir(slug: str) -> Path:
@@ -184,7 +193,36 @@ def get_book(slug: str):
             "preflight": json.loads(pf.read_text()) if (pf := _dir(slug) / "build" / "preflight.json").exists() else None,
             "files": {n: (_dir(slug) / "build" / n).stat().st_size for n in ("interior.pdf", "cover.pdf")
                       if (_dir(slug) / "build" / n).exists()},
+            "exports": exports.ready(_dir(slug) / "build"), "editions": _editions(slug),
             "job": job.id if job else None, "job_kind": job.kind if job else None}
+
+
+def _editions(slug: str) -> dict:
+    """The book this one was translated from, and the translations made of it (or of its original)."""
+    origin = state.load_state(slug).get("translated_from")
+    root = origin if origin and (state.books_dir() / origin).is_dir() else slug
+    out = []
+    for d in state.books_dir().iterdir():
+        if d.is_dir() and (d / "studio.json").exists() and d.name != root:
+            st = state.load_state(d.name)
+            if st.get("translated_from") == root:
+                b = state.summary(d.name)
+                out.append({"slug": d.name, "title": b["title"], "status": b["status"], "language": _language(d.name)})
+    origin = state.summary(root) if root != slug else None
+    return {"origin": {"slug": root, "title": origin["title"], "status": origin["status"], "language": _language(root)}
+            if root != slug else None,
+            "translations": sorted(out, key=lambda e: e["language"])}
+
+
+def _language(slug: str) -> str:
+    import yaml
+    from ..words import canonical
+    brief = (state.load_state(slug).get("brief") or {}).get("language")
+    try:
+        raw = (yaml.safe_load(state.read_yaml(slug) or "") or {}).get("language") or brief
+    except yaml.YAMLError:
+        raw = brief
+    return canonical(raw) or str(raw)
 
 
 @app.delete("/api/books/{slug}")
@@ -285,9 +323,10 @@ async def translate_book(slug: str, body: dict = Body(...)):
     import yaml
     from .. import translate
     d = _dir(slug)
-    language = (body.get("language") or "").strip()
+    from ..words import LANGUAGES, canonical
+    language = canonical((body.get("language") or "").strip()) if (body.get("language") or "").strip() else None
     if not language:
-        raise HTTPException(400, "choose a language")
+        raise HTTPException(400, f"choose one of: {', '.join(LANGUAGES)}")
     if not (d / "book.yaml").exists() or not any((d / "build" / "art").glob("*.png")):
         raise HTTPException(400, "this book has no finished art yet: illustrate it first")
     try:
@@ -297,15 +336,19 @@ async def translate_book(slug: str, body: dict = Body(...)):
         raise HTTPException(422, f"book.yaml is not valid: {e}")
     if spec_err:
         raise HTTPException(422, f"book.yaml is not valid: {spec_err}")
-    if language.lower() == str(data.get("language", "English")).lower():
+    if language == canonical(data.get("language")):
         raise HTTPException(400, f"the book is already in {language}")
     words = translate.texts(data, translate.finds(d / "build"))
-    translated = await _claude(author.translate(words, language, data.get("language", "English"), translate.check))
+    translated = await _claude(author.translate(words, language, canonical(data.get("language")) or "English",
+                                                translate.check))
     new_slug = state.slugify(f"{slug[:28]}-{language}")
     result = translate.make(d, state.books_dir() / new_slug, data, translated, language)
     st = state.load_state(slug)
+    # every edition points at the first book, so translating a translation still lands in the same family
+    origin = st.get("translated_from")
+    root = origin if origin and (state.books_dir() / origin).is_dir() else slug
     brief = {**(st.get("brief") or {}), "language": language, "title": translated.get("title", data.get("title"))}
-    state.save_state(new_slug, step="art", brief=brief, translated_from=slug,
+    state.save_state(new_slug, step="art", brief=brief, translated_from=root,
                      **{k: st[k] for k in ("outline",) if k in st})
     return {"slug": new_slug, **result,
             "redraw_cost_usd": round(sum(spec.Book.model_validate(data).images.cost(s) for s in result["redraw"]), 2)}
@@ -539,12 +582,11 @@ def book_review(slug: str):
         if not info or not (d / "build" / "thumbs" / f"{s.id}.jpg").exists():
             continue
         v = reviews.get(info["key"], {}).get("verdict")
-        issues = (text_problems(v, bool(s.lettering)) if v else []) + \
-            [i for k in ("character_issues", "anatomy_issues", "composition_issues", "style_issues")
-             for i in (v or {}).get(k, [])]
-        out.append({"id": s.id, "kind": s.kind, "thumb": f"thumbs/{s.id}.jpg", "attempts": info.get("attempts", 1),
-                    "score": v["score"] if v else None, "issues": issues,
-                    "ok": passed(v, p.book.images.min_score, bool(s.lettering)) if v else True})
+        # issues: only misspelled or stray lettering; notes: everything else, shown on request
+        issues = serious_problems(v, bool(s.lettering)) if v else []
+        notes = [n for n in review_notes(v, bool(s.lettering)) if n not in issues] if v else []
+        out.append({"id": s.id, "kind": s.kind, "thumb": f"thumbs/{s.id}.jpg", "issues": issues, "notes": notes,
+                    "ok": not issues})
     return {"mock": latest.name == "review-mock.json", "slots": out}
 
 
@@ -565,8 +607,19 @@ def _listing_md(listing: dict) -> str:
         "## Keywords", *[f"{i}. {k}" for i, k in enumerate(listing.get("keywords", []), 1)], "",
         "## Categories", *[f"- {c}" for c in listing.get("categories", [])], "",
         f"## Reading age\n{listing.get('reading_age', '')}", "",
-        f"## Suggested price\n${listing.get('suggested_price_usd', '')} - {listing.get('price_reasoning', '')}", "",
         f"## AI disclosure\n{listing.get('ai_disclosure', '')}", ""])
+
+
+@app.get("/api/books/{slug}/export/{name}")
+def export_file(slug: str, name: str):
+    """Reading and sharing copies of the print files: trimmed, no padding pages, screen size."""
+    if name not in exports.KINDS:
+        raise HTTPException(404)
+    try:
+        f = exports.get(_dir(slug) / "build", name)
+    except FileNotFoundError as e:
+        raise HTTPException(409, f"{e.args[0]} is not built yet")
+    return FileResponse(f, filename=f"{slug}-{name}", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/books/{slug}/download.zip")

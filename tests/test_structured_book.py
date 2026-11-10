@@ -149,6 +149,42 @@ def test_solutions_come_from_the_games(tmp_path):
     book = spec.Book.model_validate(structured_book(False))
     sheet = Sheet(tmp_path / "x.pdf", (8.5, 8.5), tmp_path, theme_for(book))
     text = " ".join(getattr(f, "text", "") for b in answers(sheet, book) for f in getattr(b, "parts", [b]))
-    assert "chaud — froid" in text and "pomme" in text and "grand" in text
+    assert "chaud&nbsp;—&nbsp;froid" in text and "pomme" in text and "grand" in text
     for n in range(2, 9):
         assert all(o != i for i, o in enumerate(derangement(n, n)))
+
+
+def test_text_is_set_on_the_frames_empty_paper_never_on_its_drawing(tmp_path):
+    """A generated frame whose character reaches into the middle: the words go around it, and preflight
+    fails a text box laid over the drawing."""
+    from PIL import Image, ImageDraw
+    from bookforge import kdp
+    from bookforge.imaging import calm
+    from bookforge.layout import shaped
+    from bookforge.layout.base import Sheet, frame_box, theme_for
+    from bookforge.layout.storybook import back_matter
+    from bookforge.preflight import text_on_drawing
+    (tmp_path / "book.yaml").write_text(yaml.safe_dump(structured_book(False), allow_unicode=True))
+    p = Project(tmp_path / "book.yaml", mock=True)
+    i = kdp.Interior(*p.book.trim_size, 40)
+    art = p.art_path("text-frame")
+    art.parent.mkdir(parents=True, exist_ok=True)
+    im = Image.new("RGB", (850, 850), "#FFF8EC")
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 850, 110], fill="#5AB0F0")                # sky along the top
+    d.rectangle([0, 740, 850, 850], fill="#4CAF50")              # meadow along the bottom
+    d.ellipse([60, 60, 380, 380], fill="#E05A9A")                # a character reaching into the middle
+    im.save(art)
+    (bx, by, bw, bh), panel = frame_box(i, 3, art)
+    assert not panel and calm.busy_fraction(art, i.page_w, i.page_h, (bx, by, bw, bh)) == 0
+    # the top-left of the old fixed box (76% x 80% of the page) sat on the character
+    assert calm.busy_fraction(art, i.page_w, i.page_h, (i.page_w * 0.12 + 0.3, i.page_h * 0.9 - 2.3, 2, 2)) > 0.3
+    sheet = Sheet(tmp_path / "x.pdf", (i.page_w, i.page_h), tmp_path, theme_for(p.book))
+    page = next(pg for pg in p.book.pages if pg.kind == "solutions")
+    shape = calm.shape_of(art, i.page_w, i.page_h)
+    assert shaped.place(sheet, back_matter(sheet, p.book, page, 0.8)[:2], shape, i.safe_box(3), art=art.name)
+    errors = []
+    text_on_drawing(p, i, sheet.records["text"], errors)
+    assert not errors
+    text_on_drawing(p, i, [{"page": 3, "box": [1.0, 5.5, 2.5, 1.5], "art": art.name}], errors)
+    assert errors and "over the picture" in errors[0]

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from bookforge import author, settings
 from bookforge.web import app as webapp
+from bookforge.web import state
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "picture-book" / "book.yaml"
 
@@ -314,6 +315,7 @@ def test_translate_keeps_the_art(client, monkeypatch, lettered):
     assert kept == sorted(r["reused"]) and set(json.loads((new / "build" / "review.json").read_text())["_chosen"]) == set(kept)
     if lettered:  # the words are in the pictures: those pages and the cover are drawn again
         assert "cover-front" in r["redraw"] and any(s.startswith("p0") for s in r["redraw"]) and r["redraw_cost_usd"] > 0
+        assert "the-end" in r["redraw"]  # "The End" is lettered again as "Fin", never reused in English
     else:  # nothing to draw: the translated book builds straight away from the same art
         assert r["redraw"] == [] and r["reused"]
         from bookforge.art import generate
@@ -329,6 +331,20 @@ def test_translate_keeps_the_art(client, monkeypatch, lettered):
         j = _wait(client, client.post(f"/api/books/{r['slug']}/jobs/build").json()["job"])
         assert j["status"] == "done", j["lines"]
     assert translate.check({"a": "x [[y]]"}, {"a": "x y"})  # a lost highlight is caught
+
+    # the library shows the translation right after its original, tagged with both languages
+    books = client.get("/api/books").json()
+    at = [b["slug"] for b in books].index(slug)
+    assert books[at]["editions"] == 2 and books[at]["language"] == "English"
+    assert books[at + 1]["slug"] == r["slug"] and books[at + 1]["language"] == "French"
+    assert books[at + 1]["origin"]["slug"] == slug
+    # translating the translation still ties the new book to the first one
+    r2 = client.post(f"/api/books/{r['slug']}/translate", json={"language": "German"}).json()
+    assert state.load_state(r2["slug"])["translated_from"] == slug
+    books = client.get("/api/books").json()
+    at = [b["slug"] for b in books].index(slug)
+    assert books[at]["editions"] == 3 and [b["slug"] for b in books[at + 1:at + 3]] == sorted([r["slug"], r2["slug"]],
+        key=lambda s: {r["slug"]: "French", r2["slug"]: "German"}[s])
 
 
 def test_plan_shows_the_book_structure(client):

@@ -7,7 +7,7 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from . import kdp
+from . import kdp, words as _words
 
 BookType = Literal["picture_book", "storybook", "comic"]
 PictureLayout = Literal["full_bleed", "split", "spread", "spot", "text_only"]
@@ -95,9 +95,9 @@ class OddOneOutSpec(BaseModel):
 
 class CertificateSpec(BaseModel):
     """The small certificate on the final challenge page, in the book's language."""
-    title: str = "Well done!"
-    name_label: str = "Name"
-    date_label: str = "Date"
+    title: Optional[str] = None       # unset: the book language's word (words.py)
+    name_label: Optional[str] = None
+    date_label: Optional[str] = None
 
 
 # section kinds whose page is drawn by the software: no full-page illustration, no lettering
@@ -164,6 +164,16 @@ class FrontMatter(BaseModel):
     copyright: Optional[str] = None
 
 
+class BookWords(BaseModel):
+    """The words the software prints itself, when the built-in ones for the book's language don't suit."""
+    the_end: Optional[str] = None
+    about_author: Optional[str] = None
+    well_done: Optional[str] = None
+    name: Optional[str] = None
+    date: Optional[str] = None
+    copyright: Optional[str] = None  # {year} and {author} are filled in
+
+
 class BackCover(BaseModel):
     blurb: str = ""
     prompt: Optional[str] = None  # optional separate back-cover art
@@ -226,6 +236,15 @@ class Book(BaseModel):
     # the book follows a section structure (a template): its pages ARE the interior, no built-in front matter
     sections: list[dict] = []
     images: ImageSettings = ImageSettings()
+    words: BookWords = BookWords()
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _language(cls, v) -> str:
+        lang = _words.canonical(v)
+        if not lang:
+            raise ValueError(f"language {v!r} is not supported; use one of {', '.join(_words.LANGUAGES)}")
+        return lang
 
     @field_validator("trim")
     @classmethod

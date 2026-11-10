@@ -11,7 +11,6 @@ from . import kdp
 from .project import Project
 
 TOL = 0.5 / 72  # half a point
-LOW_DPI = 150   # native art below this is upscaled more than 2x: visibly soft in print
 
 
 def _within(box, safe) -> bool:
@@ -37,7 +36,7 @@ def _unembedded_fonts(reader: PdfReader) -> set[str]:
 
 def lettering_problems(project: Project, errors: list, warnings: list) -> None:
     """Words drawn by the image model can't be measured in the PDF; the art review read them instead."""
-    from .art.generate import text_problems
+    from .art.generate import serious_problems
     from .plan import plan
 
     slots = [s for s in plan(project.book) if s.lettering]
@@ -48,8 +47,23 @@ def lettering_problems(project: Project, errors: list, warnings: list) -> None:
     chosen = reviews.get("_chosen", {})
     for s in slots:
         v = reviews.get(chosen.get(s.id, {}).get("key", ""), {}).get("verdict")
-        if v and (problems := text_problems(v, True)):
+        if v and (problems := serious_problems(v, True)):
             errors.append(f"{s.id}: " + "; ".join(problems) + " - redo it before uploading")
+
+
+ON_DRAWING = 0.01  # share of a text box allowed to touch drawn art (anti-aliasing noise)
+
+
+def text_on_drawing(project: Project, interior: kdp.Interior, texts: list, errors: list) -> None:
+    """Words set straight on a picture (no paper panel) must sit on its empty paper: the art under each
+    such box is measured again, so no layout can put letters over a character or a drawing unnoticed."""
+    from .imaging.calm import busy_fraction
+    for t in texts:
+        if not t.get("art"):
+            continue
+        src = project.art / t["art"]
+        if src.exists() and busy_fraction(src, interior.page_w, interior.page_h, t["box"]) > ON_DRAWING:
+            errors.append(f"page {t['page']}: the text runs over the picture - rebuild the book")
 
 
 def check(project: Project) -> dict:
@@ -73,9 +87,7 @@ def check(project: Project) -> dict:
     for t in m["text"]:
         if not _within(t["box"], t["safe"]):
             errors.append(f"page {t['page']}: text box {t['box']} leaves the safe area")
-    for img in m["images"]:
-        if img["native_dpi"] < LOW_DPI:
-            warnings.append(f"page {img['page']}: {img['src']} is {img['native_dpi']} DPI before upscaling - may print soft")
+    text_on_drawing(project, interior, m["text"], errors)
     blanks = m["blank"]
     run = 1
     for a, b in zip(blanks, blanks[1:]):
@@ -104,9 +116,6 @@ def check(project: Project) -> dict:
                 errors.append("cover text overlaps the barcode area")
             if not _within(t["box"], t["safe"]):
                 errors.append(f"cover text box {t['box']} leaves the safe area")
-        for img in info["images"]:
-            if img["native_dpi"] < LOW_DPI and "derived" not in img["src"]:
-                warnings.append(f"cover art {img['src']} is {img['native_dpi']} DPI before upscaling")
         cover = {"size_in": [round(cov.width, 4), round(cov.height, 4)], "spine_in": round(cov.spine, 4),
                  "spine_text": cov.spine_text_allowed}
     else:

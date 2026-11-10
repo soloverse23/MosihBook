@@ -8,6 +8,7 @@ from .art import prompting
 from .art.prompting import Lettering
 from .characters import char_id
 from .layout import geometry
+from .words import word
 from .spec import TYPESET_KINDS, Book, highlights, plain
 
 
@@ -70,7 +71,13 @@ def needs_text_frame(book: Book) -> bool:
     if not book.images.text_in_art or book.type == "comic":
         return False
     return any(p.text.strip() and (not p.prompt or p.kind in ("solutions", "copyright")) for p in book.pages
-               if p.kind not in ("maze", "guided_drawing", "imagination") and not p.drawn_activity)
+               if p.kind not in ("maze", "guided_drawing", "imagination") and not p.drawn_activity
+               and not own_border(book, p))
+
+
+def own_border(book: Book, p) -> bool:
+    """A typeset learning page of a text_in_art storybook gets its own border, drawn from its examples."""
+    return book.type == "storybook" and book.images.text_in_art and p.kind == "reference" and not p.prompt
 
 
 def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:
@@ -127,7 +134,10 @@ def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:
             space = text_space(p, layout) if p.text and layout in ("full_bleed", "spread") else None
             add(sid, layout, p.prompt, aspect, p.characters, p.text, space)
         elif book.type == "storybook":
-            if p.prompt and lettered:
+            if own_border(book, p):
+                # its own border drawn from its examples; the table is typeset in the empty middle
+                add(sid, "frame", prompting.reference_scene(book, p), page_aspect, p.characters, "")
+            elif p.prompt and lettered:
                 add(sid, p.illustration, p.prompt, page_aspect, p.characters, p.text, lettering=page_lettering(p, book))
             elif p.prompt:
                 opener = p.illustration == "opener"
@@ -152,7 +162,7 @@ def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:
     if lettered_cover and book.type != "comic" and book.characters and not book.structured:
         hero = book.characters[0].name
         add("the-end", "spot", f"A small, warm closing vignette: {hero} waving goodbye, a few motifs from the "
-            "story around them", page_aspect, [hero], "", lettering=Lettering("The End", None, "below the vignette"))
+            "story around them", page_aspect, [hero], "", lettering=Lettering(word(book, "the_end"), None, "below the vignette"))
 
     cover_aspect = (tw + kdp.BLEED) / (th + 2 * kdp.BLEED)
     cover_l = Lettering(
