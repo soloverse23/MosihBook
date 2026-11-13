@@ -1758,7 +1758,8 @@ async function stepControl(host, b, slug) {
     if (i.status === "applied") body = `<span class="badge ok">Fixed</span>`;
     else if (s === "working") body = `<div class="ctl-state"><span class="spin"></span>Fixing…</div>`;
     else if (s === "queued") body = `<div class="ctl-state">Waiting in the queue <button class="btn sm ghost" data-unq="${i.id}">Remove</button></div>`;
-    else body = `<textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
+    else body = `<label class="ctl-pick" ${report.issues.filter((x) => x.page === i.page && x.status !== "ignored").length > 1 ? "" : "hidden"}><input type="checkbox" data-pick="${i.id}" checked> Include in “Apply selected”</label>
+      <textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
       <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}" ${locked() ? "disabled" : ""}>${icon(i.fix === "image" ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
         <button class="btn sm ghost" data-skip="${i.id}" ${phase === "check" ? "disabled" : ""}>Ignore</button></div>`;
     return `<div class="ctl-issue ${i.status} ${s ? "is-" + s : ""}" id="iss-${i.id}">
@@ -1774,6 +1775,16 @@ async function stepControl(host, b, slug) {
     el.outerHTML = issueHtml(i);
     const card = $(`#iss-${id}`, host).closest(".ctl-card");
     card.classList.toggle("loading", !!card.querySelector(".is-working"));
+    refreshPage(card);
+  }
+  // the page's own button: apply the ticked fixes of that page at once (shown when it has two or more to do)
+  function refreshPage(card) {
+    const btn = $("[data-pageapply]", card);
+    if (!btn) return;
+    const open = $$("[data-pick]", card), picked = open.filter((c) => c.checked).length;
+    btn.hidden = open.length < 2;
+    btn.disabled = !picked || locked();
+    btn.innerHTML = `${icon("sparkle")}Apply selected (${picked})`;
   }
   const refreshAll = () => report?.issues.forEach((i) => refreshIssue(i.id));
 
@@ -1811,7 +1822,7 @@ async function stepControl(host, b, slug) {
     const pages = [...new Set(report.issues.filter((i) => i.status !== "ignored").map((i) => i.page))];
     box.innerHTML = pages.map((n) => `<div class="card ctl-card"><div class="card-b ctl-page">
       <a class="ctl-img" href="${png(n)}" target="_blank" rel="noopener"><img src="${png(n)}?${Math.round(report.checked)}" alt="Page ${n}" loading="lazy"><span class="ctl-load"><span class="spin"></span></span></a>
-      <div class="stack"><h3>Page ${n}</h3>${report.issues.filter((i) => i.page === n && i.status !== "ignored").map(issueHtml).join("")}</div></div></div>`).join("");
+      <div class="stack"><div class="row between"><h3>Page ${n}</h3><button class="btn sm primary" data-pageapply="${n}" hidden></button></div>${report.issues.filter((i) => i.page === n && i.status !== "ignored").map(issueHtml).join("")}</div></div></div>`).join("");
     refreshAll();
   }
 
@@ -1863,6 +1874,7 @@ async function stepControl(host, b, slug) {
   const imageCost = (list) => list.reduce((a, i) => a + (i.fix === "image" ? i.cost_usd || 0 : 0), 0);
   const redrawNote = (list) => `${list.filter((i) => i.fix === "image").length} picture${list.filter((i) => i.fix === "image").length > 1 ? "s" : ""} will be redrawn: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
 
+  host.addEventListener("change", (e) => { const c = e.target.closest("[data-pick]"); if (c) refreshPage(c.closest(".ctl-card")); });
   host.addEventListener("click", async (e) => {
     const t = e.target.closest("button");
     if (!t || !live()) return;
@@ -1883,7 +1895,7 @@ async function stepControl(host, b, slug) {
       if (i) i.status = "ignored";
       const el = $(`#iss-${id}`, host), card = el?.closest(".ctl-card");
       el?.remove();
-      if (card && !card.querySelector(".ctl-issue")) card.remove();
+      if (card && !card.querySelector(".ctl-issue")) card.remove(); else if (card) refreshPage(card);
       return drawHead();
     }
     if (t.dataset.unq) { queue.splice(queue.findIndex((q) => q.id === t.dataset.unq), 1); refreshIssue(t.dataset.unq); return drawHead(); }
@@ -1891,6 +1903,13 @@ async function stepControl(host, b, slug) {
       const i = report.issues.find((x) => x.id === t.dataset.apply);
       if (i.fix === "image" && !(await modal({ title: "Redraw this picture?", body: redrawNote([i]), confirm: "Redraw" }))) return;
       return enqueue(i.id);
+    }
+    if (t.dataset.pageapply) {
+      const card = t.closest(".ctl-card");
+      const list = $$("[data-pick]", card).filter((c) => c.checked).map((c) => report.issues.find((x) => x.id === c.dataset.pick));
+      if (!list.length) return;
+      if (list.some((i) => i.fix === "image") && !(await modal({ title: `Apply ${list.length} fixes on page ${t.dataset.pageapply}?`, body: redrawNote(list), confirm: "Apply" }))) return;
+      return list.forEach((i) => enqueue(i.id));
     }
     if (t.id === "apply-all") {
       const list = todoList();
