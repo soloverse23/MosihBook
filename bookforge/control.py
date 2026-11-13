@@ -54,6 +54,8 @@ Rules:
       `text_position`, `layout`, `chapter` fields), naming the page and quoting the exact words.
 - `current` and `replace_with` are only for a wording fix: what is written now and what it must say.
 - `problem` is one plain sentence a parent could understand. `page` is the PDF page number.
+- Some pages list "Already ignored by the writer". The writer has seen those and decided to keep them as
+  they are: never report them again, nor the same defect worded differently.
 """
 
 SCHEMA = {
@@ -98,11 +100,28 @@ def page_info(project: Project) -> dict[int, dict]:
     return info
 
 
-async def _check_batch(project: Project, pages: list[int], info: dict, language: str) -> list[dict]:
+def _same(a: dict, b: dict) -> bool:
+    """Does a freshly found issue describe a problem the writer already ignored? Same page and either the
+    same wording to fix or mostly the same words in the description."""
+    if a["page"] != b["page"]:
+        return False
+    cur_a, cur_b = (a.get("current") or "").strip(), (b.get("current") or "").strip()
+    if cur_a and cur_a == cur_b:
+        return True
+    wa, wb = set(re.findall(r"\w+", a["problem"].lower())), set(re.findall(r"\w+", b["problem"].lower()))
+    return bool(wa and wb) and len(wa & wb) / min(len(wa), len(wb)) >= 0.6
+
+
+async def _check_batch(project: Project, pages: list[int], info: dict, language: str,
+                       ignored: list[dict] = ()) -> list[dict]:
     lines = []
     for n in pages:
         t = info[n]["text"]
         lines.append(f"page-{n:03d}.png: " + (f"manuscript text:\n{t}" if t else "text unknown (part of the picture)"))
+        for i in ignored:
+            if i["page"] == n:
+                lines.append(f"  Already ignored by the writer: {i['problem']}"
+                             + (f" (\"{i['current']}\")" if i.get("current") else ""))
     prompt = (f"The book is written in {language}. Check these pages.\n\n" + "\n\n".join(lines)
               + "\n\nReturn every real defect on these pages only.")
     out = await author.ask(prompt, SYSTEM, SCHEMA, images=[info[n]["proof"] for n in pages])
@@ -129,17 +148,20 @@ async def inspect(project: Project) -> dict:
     info = page_info(project)
     nums = sorted(info)
     sem = asyncio.Semaphore(PARALLEL)
+    # what the writer already ignored stays ignored: it is kept in the report and never raised again
+    ignored = [i for i in (load(project) or {"issues": []})["issues"] if i.get("status") == "ignored"]
 
     async def one(chunk):
         async with sem:
-            return await _check_batch(project, chunk, info, str(project.book.language))
+            return await _check_batch(project, chunk, info, str(project.book.language), ignored)
 
     found = await asyncio.gather(*(one(nums[i:i + BATCH]) for i in range(0, len(nums), BATCH)))
-    issues = [_normalise(i, info) for batch in found for i in batch]
-    issues.sort(key=lambda i: i["page"])
+    fresh = [_normalise(i, info) for batch in found for i in batch]
+    fresh = [i for i in fresh if not any(_same(i, g) for g in ignored)]
+    issues = sorted(fresh + ignored, key=lambda i: i["page"])
     for k, i in enumerate(issues, 1):
         i["id"] = f"c{k:03d}"
-        i["status"] = "open"        # open | applied | ignored
+        i.setdefault("status", "open")        # open | applied | ignored
     report = {"checked": time.time(), "pages": len(nums), "issues": issues}
     report_path(project).write_text(json.dumps(report, indent=2, ensure_ascii=False))
     return report
