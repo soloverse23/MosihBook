@@ -1745,7 +1745,7 @@ async function stepControl(host, b, slug) {
   // book is rebuilt and read again, because the check reads the built pages.
   const queue = [];                 // [{ id, prompt }]
   let working = null, phase = null; // phase: null | "fix" | "build" | "check"
-  host.innerHTML = head + `<div class="stack">${jobPanel("Working…")}<div id="ctl-head"></div><div class="stack" id="ctl"></div></div>`;
+  host.innerHTML = head + `<div class="stack"><div class="ctl-sticky">${jobPanel("Working…")}<div id="ctl-head"></div></div><div class="stack" id="ctl"></div></div>`;
   const png = (n) => `/api/books/${slug}/build/proofs/page-${String(n).padStart(3, "0")}.png`;
   const stat = (id) => (working === id ? "working" : queue.some((q) => q.id === id) ? "queued" : null);
   const reload = async () => { report = (await api("GET", `/api/books/${slug}/control`)).report; };
@@ -1760,7 +1760,7 @@ async function stepControl(host, b, slug) {
     else if (s === "queued") body = `<div class="ctl-state">Waiting in the queue <button class="btn sm ghost" data-unq="${i.id}">Remove</button></div>`;
     else body = `<label class="ctl-pick" ${report.issues.filter((x) => x.page === i.page && x.status !== "ignored").length > 1 ? "" : "hidden"}><input type="checkbox" data-pick="${i.id}" checked> Include in “Apply selected”</label>
       <textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
-      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}" ${locked() ? "disabled" : ""}>${icon(i.fix === "image" ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
+      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}">${icon(i.fix === "image" ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
         <button class="btn sm ghost" data-skip="${i.id}" ${phase === "check" ? "disabled" : ""}>Ignore</button></div>`;
     return `<div class="ctl-issue ${i.status} ${s ? "is-" + s : ""}" id="iss-${i.id}">
       <div class="row gap2"><span class="badge ${i.fix === "image" ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span></div>
@@ -1773,6 +1773,7 @@ async function stepControl(host, b, slug) {
     const el = $(`#iss-${id}`, host), i = report?.issues.find((x) => x.id === id);
     if (!el || !i) return;
     el.outerHTML = issueHtml(i);
+    voiceify($(`#iss-${id}`, host));
     const card = $(`#iss-${id}`, host).closest(".ctl-card");
     card.classList.toggle("loading", !!card.querySelector(".is-working"));
     refreshPage(card);
@@ -1783,7 +1784,7 @@ async function stepControl(host, b, slug) {
     if (!btn) return;
     const open = $$("[data-pick]", card), picked = open.filter((c) => c.checked).length;
     btn.hidden = open.length < 2;
-    btn.disabled = !picked || locked();
+    btn.disabled = !picked;
     btn.innerHTML = `${icon("sparkle")}Apply selected (${picked})`;
   }
   const refreshAll = () => report?.issues.forEach((i) => refreshIssue(i.id));
@@ -1803,7 +1804,7 @@ async function stepControl(host, b, slug) {
     box.innerHTML = `<div class="card"><div class="card-b row between">
       <div class="row gap2">${line}<span class="faint small"> · ${report.pages} pages read</span></div>
       <div class="row gap2">
-        ${free > 1 && !locked() ? `<button class="btn primary" id="apply-all">${icon("sparkle")}Apply all (${free})</button>` : ""}
+        ${free > 1 ? `<button class="btn primary" id="apply-all">${icon("sparkle")}Apply all (${free})</button>` : ""}
         ${report.rebuild && !busyNow ? `<button class="btn primary" id="rebuild">${icon("file")}Rebuild the book</button>` : ""}
         <button class="btn" id="check" ${busyNow ? "disabled" : ""}>${icon("refresh")}Check again</button>
         ${!todo && !report.rebuild && !busyNow ? `<a class="btn primary" href="#/book/${slug}/publish">Next: publish${icon("arrow")}</a>` : ""}</div></div></div>`;
@@ -1823,6 +1824,7 @@ async function stepControl(host, b, slug) {
     box.innerHTML = pages.map((n) => `<div class="card ctl-card"><div class="card-b ctl-page">
       <a class="ctl-img" href="${png(n)}" target="_blank" rel="noopener"><img src="${png(n)}?${Math.round(report.checked)}" alt="Page ${n}" loading="lazy"><span class="ctl-load"><span class="spin"></span></span></a>
       <div class="stack"><div class="row between"><h3>Page ${n}</h3><button class="btn sm primary" data-pageapply="${n}" hidden></button></div>${report.issues.filter((i) => i.page === n && i.status !== "ignored").map(issueHtml).join("")}</div></div></div>`).join("");
+    voiceify(box);
     refreshAll();
   }
 
@@ -1842,21 +1844,26 @@ async function stepControl(host, b, slug) {
     if (pumping) return;
     pumping = true;
     try {
-      let did = false;
-      while (queue.length && live()) {
-        const it = queue.shift();
-        working = it.id; phase = "fix"; refreshIssue(it.id); drawHead();
-        try { await applyOne(it); did = true; } catch (e) { toast(e.message, true); }
-        working = null;
-        await reload();
-        if (live()) { refreshIssue(it.id); drawHead(); }
-      }
-      if (did && live()) {   // the queue is done: build the book again, then read it again
+      while (live()) {
+        let did = false;
+        while (queue.length && live()) {
+          const it = queue.shift();
+          working = it.id; phase = "fix"; refreshIssue(it.id); drawHead();
+          try { await applyOne(it); did = true; } catch (e) { toast(e.message, true); }
+          working = null;
+          await reload();
+          if (live()) { refreshIssue(it.id); drawHead(); }
+        }
+        if (!did || !live()) break;
+        // the queue is done: build the book again, then read it again. Fixes asked for meanwhile wait in the queue.
         phase = "build"; drawHead(); refreshAll();
         const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
         await watchJob(job, "Building print files…", 0);
         phase = "check"; drawHead();
         report = (await api("POST", `/api/books/${slug}/control/check`)).report;
+        remap();
+        phase = null; draw();
+        if (!queue.length) break;
       }
     } catch (e) {
       toast(e.message, true);
@@ -1867,10 +1874,20 @@ async function stepControl(host, b, slug) {
   }
 
   const enqueue = (id) => {
-    const el = $(`[data-prompt="${id}"]`, host);
-    queue.push({ id, prompt: (el?.value || report.issues.find((x) => x.id === id).prompt).trim() });
+    const el = $(`[data-prompt="${id}"]`, host), i = report.issues.find((x) => x.id === id);
+    queue.push({ id, prompt: (el?.value || i.prompt).trim(), page: i.page, fix: i.fix, problem: i.problem });
     refreshIssue(id); drawHead(); pump();
   };
+  // a new check numbers its issues again: queued fixes follow their problem (same page, same kind of fix)
+  function remap() {
+    let lost = 0;
+    for (const q of queue.splice(0)) {
+      const cands = report.issues.filter((i) => i.status === "open" && i.page === q.page && i.fix === q.fix && !queue.some((x) => x.id === i.id));
+      const m = cands.find((i) => i.problem === q.problem) || (cands.length === 1 ? cands[0] : null);
+      if (m) queue.push({ ...q, id: m.id }); else lost++;
+    }
+    if (lost) toast(`${lost} queued fix${lost > 1 ? "es were" : " was"} dropped: the new check no longer shows ${lost > 1 ? "them" : "it"}.`);
+  }
   const imageCost = (list) => list.reduce((a, i) => a + (i.fix === "image" ? i.cost_usd || 0 : 0), 0);
   const redrawNote = (list) => `${list.filter((i) => i.fix === "image").length} picture${list.filter((i) => i.fix === "image").length > 1 ? "s" : ""} will be redrawn: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
 

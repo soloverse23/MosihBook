@@ -928,6 +928,11 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 }
 
 /* control & correction */
+/* the bar of overall actions and the running queue stay in view while the pages scroll underneath */
+.ctl-sticky { position: sticky; top: 0; z-index: 5; display: grid; gap: var(--s3); padding: var(--s3) 0; background: var(--bg);
+  max-height: 100vh; overflow-y: auto; }
+.ctl-sticky:has(> #job[hidden]):has(> #ctl-head:empty) { display: none; }
+@media (max-width: 860px) { .ctl-sticky { top: 52px; max-height: calc(100vh - 52px); } }
 .ctl-page { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: var(--s5); align-items: start; }
 .ctl-img { position: relative; display: block; }
 .ctl-img img { width: 100%; display: block; border: 1px solid var(--line); border-radius: var(--r); }
