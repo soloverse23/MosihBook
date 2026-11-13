@@ -1740,70 +1740,165 @@ async function stepControl(host, b, slug) {
     host.innerHTML = head + note("info", `Build the book first: the check reads the finished pages. <a href="#/book/${slug}/art">Go to Art &amp; build</a>`);
     return;
   }
-  let report = (await api("GET", `/api/books/${slug}/control`)).report, running = false;
-  host.innerHTML = head + `<div class="stack">${jobPanel("Working…")}<div class="stack" id="ctl"></div></div>`;
-  const go = (fn) => async (e) => { if (running) return; running = true; try { await fn(e.currentTarget); } finally { running = false; if (host.isConnected) draw(); } };
-  const reload = async () => { report = (await api("GET", `/api/books/${slug}/control`)).report; };
-  const check = (btn) => busy(btn, "Reading the pages…", async () => { report = (await api("POST", `/api/books/${slug}/control/check`)).report; });
+  let report = (await api("GET", `/api/books/${slug}/control`)).report;
+  // The queue: fixes wait here and run one after another (a book runs one job at a time). When it empties the
+  // book is rebuilt and read again, because the check reads the built pages.
+  const queue = [];                 // [{ id, prompt }]
+  let working = null, phase = null; // phase: null | "fix" | "build" | "check"
+  host.innerHTML = head + `<div class="stack">${jobPanel("Working…")}<div id="ctl-head"></div><div class="stack" id="ctl"></div></div>`;
   const png = (n) => `/api/books/${slug}/build/proofs/page-${String(n).padStart(3, "0")}.png`;
+  const stat = (id) => (working === id ? "working" : queue.some((q) => q.id === id) ? "queued" : null);
+  const reload = async () => { report = (await api("GET", `/api/books/${slug}/control`)).report; };
+  const locked = () => phase === "build" || phase === "check";
+  const live = () => host.isConnected;
 
   function issueHtml(i) {
-    const done = i.status === "applied";
-    return `<div class="ctl-issue ${i.status}">
-      <div class="row gap2"><span class="badge ${i.fix === "image" ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span>${done ? `<span class="badge ok">Fixed: rebuild to see it</span>` : ""}</div>
+    const s = stat(i.id);
+    let body;
+    if (i.status === "applied") body = `<span class="badge ok">Fixed</span>`;
+    else if (s === "working") body = `<div class="ctl-state"><span class="spin"></span>Fixing…</div>`;
+    else if (s === "queued") body = `<div class="ctl-state">Waiting in the queue <button class="btn sm ghost" data-unq="${i.id}">Remove</button></div>`;
+    else body = `<textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
+      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}" ${locked() ? "disabled" : ""}>${icon(i.fix === "image" ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
+        <button class="btn sm ghost" data-skip="${i.id}" ${phase === "check" ? "disabled" : ""}>Ignore</button></div>`;
+    return `<div class="ctl-issue ${i.status} ${s ? "is-" + s : ""}" id="iss-${i.id}">
+      <div class="row gap2"><span class="badge ${i.fix === "image" ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span></div>
       <p class="ctl-problem">${esc(i.problem)}</p>
-      ${i.replace_with ? `<p class="ctl-swap">${i.current ? `<s>${esc(i.current)}</s> → ` : ""}<b>${esc(i.replace_with)}</b></p>` : ""}
-      ${done ? "" : `<textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
-      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}">${icon(i.fix === "image" ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
-        <button class="btn sm ghost" data-skip="${i.id}">Ignore</button></div>`}</div>`;
+      ${i.replace_with ? `<p class="ctl-swap">${i.current ? `<s>${esc(i.current)}</s> → ` : ""}<b>${esc(i.replace_with)}</b></p>` : ""}${body}</div>`;
+  }
+
+  // only the issue (and its page) that changed is redrawn, so nothing else on the screen moves
+  function refreshIssue(id) {
+    const el = $(`#iss-${id}`, host), i = report?.issues.find((x) => x.id === id);
+    if (!el || !i) return;
+    el.outerHTML = issueHtml(i);
+    const card = $(`#iss-${id}`, host).closest(".ctl-card");
+    card.classList.toggle("loading", !!card.querySelector(".is-working"));
+  }
+  const refreshAll = () => report?.issues.forEach((i) => refreshIssue(i.id));
+
+  const todoList = () => (report?.issues || []).filter((i) => i.status === "open" && !stat(i.id));
+
+  function drawHead() {
+    const box = $("#ctl-head", host);
+    if (!report) { box.innerHTML = ""; return; }
+    const open = report.issues.filter((i) => i.status !== "ignored");
+    const todo = open.filter((i) => i.status === "open").length;
+    const free = todoList().length, busyNow = phase || queue.length || working;
+    const line = phase === "build" ? `<span class="spin"></span>Rebuilding the book…`
+      : phase === "check" ? `<span class="spin"></span>Reading every page again…`
+      : busyNow ? `<span class="spin"></span>Fixing: ${queue.length + (working ? 1 : 0)} left`
+      : open.length ? `<b>${todo} to fix</b>${open.length > todo ? ` · ${open.length - todo} fixed` : ""}` : `<b>No problems found</b>`;
+    box.innerHTML = `<div class="card"><div class="card-b row between">
+      <div class="row gap2">${line}<span class="faint small"> · ${report.pages} pages read</span></div>
+      <div class="row gap2">
+        ${free > 1 && !locked() ? `<button class="btn primary" id="apply-all">${icon("sparkle")}Apply all (${free})</button>` : ""}
+        ${report.rebuild && !busyNow ? `<button class="btn primary" id="rebuild">${icon("file")}Rebuild the book</button>` : ""}
+        <button class="btn" id="check" ${busyNow ? "disabled" : ""}>${icon("refresh")}Check again</button>
+        ${!todo && !report.rebuild && !busyNow ? `<a class="btn primary" href="#/book/${slug}/publish">Next: publish${icon("arrow")}</a>` : ""}</div></div></div>`;
   }
 
   function draw() {
-    const box = $("#ctl");
+    const box = $("#ctl", host);
     if (!report) {
+      $("#ctl-head", host).innerHTML = "";
       box.innerHTML = `<div class="card act"><div class="act-b"><h3>Check the book</h3>
         <p>Claude looks at every page for real mistakes: spelling, cut or crowded text, pictures that contradict the words. It changes nothing by itself.</p></div>
         <div class="act-a"><button class="btn primary" id="check">${icon("eye")}Check every page</button></div></div>`;
-      $("#check").onclick = go(check);
       return;
     }
-    const open = report.issues.filter((i) => i.status !== "ignored");
-    const todo = open.filter((i) => i.status === "open").length;
-    const pages = [...new Set(open.map((i) => i.page))];
-    box.innerHTML = `<div class="card"><div class="card-b row between">
-        <div>${open.length ? `<b>${todo} to fix</b>${open.length > todo ? ` · ${open.length - todo} fixed` : ""}` : `<b>No problems found</b>`}
-          <span class="faint small"> · ${report.pages} pages read</span></div>
-        <div class="row gap2">
-          ${report.rebuild ? `<button class="btn primary" id="rebuild">${icon("file")}Rebuild the book</button>` : ""}
-          <button class="btn" id="check">${icon("refresh")}Check again</button>
-          ${!todo && !report.rebuild ? `<a class="btn primary" href="#/book/${slug}/publish">Next: publish${icon("arrow")}</a>` : ""}</div></div></div>`
-      + pages.map((n) => `<div class="card"><div class="card-b ctl-page">
-        <a href="${png(n)}" target="_blank" rel="noopener"><img src="${png(n)}?${Math.round(report.checked)}" alt="Page ${n}" loading="lazy"></a>
-        <div class="stack"><h3>Page ${n}</h3>${open.filter((i) => i.page === n).map(issueHtml).join("")}</div></div></div>`).join("");
-    $("#check").onclick = go(check);
-    $("#rebuild")?.addEventListener("click", go(async () => {
-      const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
-      await watchJob(job, "Building print files…", 0);
-      await reload();
-    }));
-    $$("[data-skip]", box).forEach((btn) => (btn.onclick = go(async () => {
-      await api("PUT", `/api/books/${slug}/control/${btn.dataset.skip}`, { status: "ignored" }); await reload();
-    })));
-    $$("[data-apply]", box).forEach((btn) => (btn.onclick = go(async () => {
-      const i = report.issues.find((x) => x.id === btn.dataset.apply);
-      const prompt = $(`[data-prompt="${i.id}"]`, box).value.trim();
-      if (i.fix === "image") {
-        if (!(await modal({ title: "Redraw this picture?", body: `Draws ${esc(i.slot)} once more with your fix: about ${money(i.cost_usd || 0)}.<br><br>This uses the OpenAI image API and costs real money.`, confirm: "Redraw" }))) return;
-        try {
-          const { job } = await api("POST", `/api/books/${slug}/control/${i.id}/apply`, { prompt });
-          await watchJob(job, `Redrawing ${i.slot}…`, 1);
-        } catch (e) { toast(e.message, true); return; }
-      } else {
-        await busy(btn, "Fixing…", () => api("POST", `/api/books/${slug}/control/${i.id}/apply`, { prompt }));
-      }
-      await reload();
-    })));
+    drawHead();
+    const pages = [...new Set(report.issues.filter((i) => i.status !== "ignored").map((i) => i.page))];
+    box.innerHTML = pages.map((n) => `<div class="card ctl-card"><div class="card-b ctl-page">
+      <a class="ctl-img" href="${png(n)}" target="_blank" rel="noopener"><img src="${png(n)}?${Math.round(report.checked)}" alt="Page ${n}" loading="lazy"><span class="ctl-load"><span class="spin"></span></span></a>
+      <div class="stack"><h3>Page ${n}</h3>${report.issues.filter((i) => i.page === n && i.status !== "ignored").map(issueHtml).join("")}</div></div></div>`).join("");
+    refreshAll();
   }
+
+  async function check(btn) {
+    await busy(btn, "Reading the pages…", async () => { report = (await api("POST", `/api/books/${slug}/control/check`)).report; });
+    if (live()) draw();
+  }
+
+  async function applyOne(it) {
+    const i = report.issues.find((x) => x.id === it.id);
+    const r = await api("POST", `/api/books/${slug}/control/${it.id}/apply`, { prompt: it.prompt });
+    if (r.job) await watchJob(r.job, `Redrawing ${i.slot}…`, 1);
+  }
+
+  let pumping = false;
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      let did = false;
+      while (queue.length && live()) {
+        const it = queue.shift();
+        working = it.id; phase = "fix"; refreshIssue(it.id); drawHead();
+        try { await applyOne(it); did = true; } catch (e) { toast(e.message, true); }
+        working = null;
+        await reload();
+        if (live()) { refreshIssue(it.id); drawHead(); }
+      }
+      if (did && live()) {   // the queue is done: build the book again, then read it again
+        phase = "build"; drawHead(); refreshAll();
+        const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
+        await watchJob(job, "Building print files…", 0);
+        phase = "check"; drawHead();
+        report = (await api("POST", `/api/books/${slug}/control/check`)).report;
+      }
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      working = null; phase = null; pumping = false;
+      if (live()) { try { await reload(); } catch {} draw(); }
+    }
+  }
+
+  const enqueue = (id) => {
+    const el = $(`[data-prompt="${id}"]`, host);
+    queue.push({ id, prompt: (el?.value || report.issues.find((x) => x.id === id).prompt).trim() });
+    refreshIssue(id); drawHead(); pump();
+  };
+  const imageCost = (list) => list.reduce((a, i) => a + (i.fix === "image" ? i.cost_usd || 0 : 0), 0);
+  const redrawNote = (list) => `${list.filter((i) => i.fix === "image").length} picture${list.filter((i) => i.fix === "image").length > 1 ? "s" : ""} will be redrawn: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
+
+  host.addEventListener("click", async (e) => {
+    const t = e.target.closest("button");
+    if (!t || !live()) return;
+    if (t.id === "check") return check(t);
+    if (t.id === "rebuild") {
+      if (pumping) return;
+      pumping = true; phase = "build"; drawHead();
+      try { const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {}); await watchJob(job, "Building print files…", 0); }
+      catch (err) { toast(err.message, true); }
+      finally { pumping = false; phase = null; await reload(); draw(); }
+      return;
+    }
+    if (t.dataset.skip) {   // the issue goes away at once; the page card goes with its last issue
+      const id = t.dataset.skip;
+      try { await api("PUT", `/api/books/${slug}/control/${id}`, { status: "ignored" }); }
+      catch (err) { return toast(err.message, true); }
+      const i = report.issues.find((x) => x.id === id);
+      if (i) i.status = "ignored";
+      const el = $(`#iss-${id}`, host), card = el?.closest(".ctl-card");
+      el?.remove();
+      if (card && !card.querySelector(".ctl-issue")) card.remove();
+      return drawHead();
+    }
+    if (t.dataset.unq) { queue.splice(queue.findIndex((q) => q.id === t.dataset.unq), 1); refreshIssue(t.dataset.unq); return drawHead(); }
+    if (t.dataset.apply) {
+      const i = report.issues.find((x) => x.id === t.dataset.apply);
+      if (i.fix === "image" && !(await modal({ title: "Redraw this picture?", body: redrawNote([i]), confirm: "Redraw" }))) return;
+      return enqueue(i.id);
+    }
+    if (t.id === "apply-all") {
+      const list = todoList();
+      const body = list.some((i) => i.fix === "image") ? redrawNote(list) : "The words and layout will be fixed.";
+      if (!(await modal({ title: `Apply all ${list.length} fixes?`, body: `${body}<br><br>They run one after another, then the book is rebuilt and checked again.`, confirm: "Apply all" }))) return;
+      list.forEach((i) => enqueue(i.id));
+    }
+  });
   draw();
 }
 
