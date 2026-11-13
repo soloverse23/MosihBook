@@ -387,9 +387,31 @@ def test_control_and_correction(client, monkeypatch):
     rep = client.get(f"/api/books/{slug}/control").json()["report"]
     assert [i["status"] for i in rep["issues"]] == ["ignored", "open"]
 
+    seen = []
+
     async def revise(yaml_text, instruction):
-        assert "page 6" in instruction
+        seen.append(instruction)
         return yaml_text
     monkeypatch.setattr(author, "revise", revise)
-    c = client.post(f"/api/books/{slug}/control/{b['id']}/apply", json={"prompt": "x"})
-    assert c.status_code in (200, 409)
+    # a text fix that changes nothing is refused and the issue stays open
+    import json
+    from bookforge import control
+    from bookforge.project import Project
+    pr = Project(state.book_dir(slug) / "book.yaml")
+    rep = control.load(pr)
+    text_issue = rep["issues"][0]
+    text_issue.update(fix="text", slot=None, book_page=3, status="open")
+    control.report_path(pr).write_text(json.dumps(rep))
+    c = client.post(f"/api/books/{slug}/control/{text_issue['id']}/apply", json={"prompt": "Fix the spelling."})
+    assert c.status_code == 502 and "no change" in c.json()["detail"]
+    assert "page 3 of the `pages:` list in book.yaml" in seen[0] and "page 6 of the printed PDF" in seen[0]
+    assert client.get(f"/api/books/{slug}/control").json()["report"]["issues"][0]["status"] == "open"
+
+    # a real change is written to book.yaml, the issue is applied and the book is flagged for a rebuild
+    async def revise_ok(yaml_text, instruction):
+        return yaml_text.replace("title: ", "title: Fixed ", 1)
+    monkeypatch.setattr(author, "revise", revise_ok)
+    c = client.post(f"/api/books/{slug}/control/{text_issue['id']}/apply", json={"prompt": "Fix the spelling."})
+    assert c.status_code == 200 and c.json() == {"yaml": True}
+    rep = client.get(f"/api/books/{slug}/control").json()["report"]
+    assert rep["issues"][0]["status"] == "applied" and rep["rebuild"] is True

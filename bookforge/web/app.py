@@ -590,7 +590,7 @@ async def control_apply(slug: str, issue_id: str, body: dict = Body(default={}))
         control.set_status(p, issue_id, "applied", prompt)
         return {"job": job.id, "slot": issue["slot"]}
     current = state.read_yaml(slug)
-    text = await _claude(control.apply_text(current, f"On page {issue['page']} of the printed book: {prompt}"))
+    text = await _claude(control.apply_text(current, issue, prompt))
     state.write_yaml(slug, text)
     control.set_status(p, issue_id, "applied", prompt)
     return {"yaml": True}

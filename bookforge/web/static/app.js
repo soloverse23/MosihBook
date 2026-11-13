@@ -269,6 +269,15 @@ function dictate(field, btn) {
   rec.start();
 }
 
+// Typing by hand in any box stops the mic (our own dictated "input" events are not trusted keystrokes).
+document.addEventListener("keydown", (e) => {
+  if (!dictation || !e.isTrusted) return;
+  if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Tab", "Escape"].includes(e.key)) return;
+  if (e.ctrlKey || e.metaKey) return;
+  if (!e.target.matches?.("input, textarea, [contenteditable]")) return;
+  dictation.rec.stop();
+}, true);
+
 // ---------- jobs ----------
 function logLine(s) {
   const cls = /^(ERROR|FAILED|NEEDS ATTENTION)/.test(s) ? "e" : /^WARN/.test(s) ? "w" : /PASS/.test(s) ? "g" : "";
@@ -1804,6 +1813,7 @@ async function stepControl(host, b, slug) {
     box.innerHTML = `<div class="card"><div class="card-b row between">
       <div class="row gap2">${line}<span class="faint small"> · ${report.pages} pages read</span></div>
       <div class="row gap2">
+        ${free > 1 ? `<button class="btn" id="ignore-all" ${phase === "check" ? "disabled" : ""}>Ignore all (${free})</button>` : ""}
         ${free > 1 ? `<button class="btn primary" id="apply-all">${icon("sparkle")}Apply all (${free})</button>` : ""}
         ${report.rebuild && !busyNow ? `<button class="btn primary" id="rebuild">${icon("file")}Rebuild the book</button>` : ""}
         <button class="btn" id="check" ${busyNow ? "disabled" : ""}>${icon("refresh")}Check again</button>
@@ -1828,9 +1838,24 @@ async function stepControl(host, b, slug) {
     refreshAll();
   }
 
+  // "Check again" always reads the latest book: it is built first, then every page is read.
   async function check(btn) {
-    await busy(btn, "Reading the pages…", async () => { report = (await api("POST", `/api/books/${slug}/control/check`)).report; });
-    if (live()) draw();
+    if (pumping) return;
+    pumping = true;
+    try {
+      if (report) { phase = "build"; drawHead(); }
+      const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
+      const r = await watchJob(job, "Building print files…", 0);
+      if (r?.status === "failed") throw new Error("The book could not be built, so it was not checked.");
+      if (report) { phase = "check"; drawHead(); }
+      await busy(btn, "Reading the pages…", async () => { report = (await api("POST", `/api/books/${slug}/control/check`)).report; });
+      remap();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      phase = null; pumping = false;
+      if (live()) { if (!report) { try { await reload(); } catch {} } draw(); }
+    }
   }
 
   async function applyOne(it) {
@@ -1927,6 +1952,15 @@ async function stepControl(host, b, slug) {
       if (!list.length) return;
       if (list.some((i) => i.fix === "image") && !(await modal({ title: `Apply ${list.length} fixes on page ${t.dataset.pageapply}?`, body: redrawNote(list), confirm: "Apply" }))) return;
       return list.forEach((i) => enqueue(i.id));
+    }
+    if (t.id === "ignore-all") {
+      const list = todoList();
+      if (!list.length || !(await modal({ title: `Ignore all ${list.length} problems?`, body: "They are hidden now and stay hidden on every re-check.", confirm: "Ignore all" }))) return;
+      t.disabled = true;
+      try {
+        for (const i of list) { await api("PUT", `/api/books/${slug}/control/${i.id}`, { status: "ignored" }); i.status = "ignored"; }
+      } catch (err) { toast(err.message, true); }
+      return draw();
     }
     if (t.id === "apply-all") {
       const list = todoList();
@@ -2408,10 +2442,10 @@ async function checkForUpdate() {
   }
   if (!u.enabled || !u.available || sessionStorage.getItem("mb-update-later") === u.latest) return;
   const notes = (u.notes || "").trim();
-  const ok = await modal({ title: "A new version of MosiBooks is ready",
-    body: `Version ${esc(u.latest)} is available (you have ${esc(u.current)}). Updating takes a minute or two. Your books and settings stay as they are.`
+  const ok = await modal({ title: `MosiBooks ${u.latest} is ready`,
+    body: `You have version ${esc(u.current)}. Updating to version ${esc(u.latest)} takes a minute or two. Your books and settings stay as they are.`
       + (notes ? `</p><p class="update-notes" dir="auto">${esc(notes)}` : ""),
-    confirm: "Update now" });
+    confirm: `Update to ${u.latest}` });
   if (!ok) { sessionStorage.setItem("mb-update-later", u.latest); return; }
   runUpdate(u.latest);
 }
@@ -2422,12 +2456,12 @@ async function runUpdate(target) {
     root.innerHTML = `<div class="backdrop"><div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="u-t" aria-live="polite">
       <div class="mb"><h2 id="u-t">${spin ? '<span class="spin"></span> ' : ""}${esc(title)}</h2><p>${esc(text)}</p></div></div></div>`;
   };
-  show("Downloading the update", "Keep this page open. MosiBooks will restart by itself.");
+  show(`Downloading version ${target}`, "Keep this page open. MosiBooks will restart by itself.");
   try {
     await api("POST", "/api/update/apply");
   } catch (e) { root.innerHTML = ""; toast(e.message, true); return; }
   sessionStorage.setItem("mb-updated-to", target);
-  show("Installing the update", "MosiBooks is closing, installing the new version and starting again. This page reloads by itself.");
+  show(`Installing version ${target}`, "MosiBooks is closing, installing the new version and starting again. This page reloads by itself.");
   const alive = () => fetch("/api/auth/status", { cache: "no-store" }).then((r) => r.ok, () => false);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const t0 = Date.now();

@@ -91,11 +91,12 @@ def page_info(project: Project) -> dict[int, dict]:
     for n in range(1, m["pages"] + 1):
         pic = next((i["src"] for i in m["images"] if i["page"] == n and _slot_of(i["src"]) in slots), None)
         sid = _slot_of(pic) if pic else None
-        text = None
+        text, book_page = None, None
         if sid and (mt := re.fullmatch(r"p(\d+)", sid)):
-            pg = project.book.pages[int(mt.group(1)) - 1]
+            book_page = int(mt.group(1))
+            pg = project.book.pages[book_page - 1]
             text = "\n".join(x for x in (pg.chapter, pg.text) if x)
-        info[n] = {"proof": project.proofs / f"page-{n:03d}.png", "slot": sid, "text": text,
+        info[n] = {"proof": project.proofs / f"page-{n:03d}.png", "slot": sid, "text": text, "book_page": book_page,
                    "lettered": bool(sid and slots[sid].lettering)}
     return info
 
@@ -138,7 +139,8 @@ def _normalise(issue: dict, info: dict) -> dict:
         fix = "text"             # a typeset page has no picture of its own to redraw
     return {"page": issue["page"], "problem": issue["problem"].strip(), "current": (issue.get("current") or "").strip(),
             "replace_with": (issue.get("replace_with") or "").strip(), "fix": fix,
-            "prompt": issue["prompt"].strip(), "slot": p.get("slot") if fix == "image" else None}
+            "prompt": issue["prompt"].strip(), "slot": p.get("slot") if fix == "image" else None,
+            "book_page": p.get("book_page")}
 
 
 async def inspect(project: Project) -> dict:
@@ -193,6 +195,20 @@ def view(project: Project) -> dict | None:
     return report
 
 
-def apply_text(current_yaml: str, prompt: str):
-    """The coroutine that rewrites book.yaml for a text or layout fix."""
-    return author.revise(current_yaml, prompt)
+def instruction(issue: dict, prompt: str) -> str:
+    """What the editor of book.yaml is told. PDF page numbers differ from the pages of book.yaml (cover, front
+    matter), so the page is named by its place in book.yaml and its words are quoted."""
+    bp = issue.get("book_page")
+    where = (f"On page {bp} of the `pages:` list in book.yaml (page {issue['page']} of the printed PDF)" if bp
+             else f"On page {issue['page']} of the printed PDF (find it by its words)")
+    quote = f' Wording to change: "{issue["current"]}" -> "{issue["replace_with"]}".' if issue.get("current") and issue.get("replace_with") else ""
+    return f"{where}: {prompt}{quote} Change only what this asks."
+
+
+async def apply_text(current_yaml: str, issue: dict, prompt: str) -> str:
+    """Rewrite book.yaml for a text or layout fix. Raises if Claude changed nothing, so a fix is never
+    reported as done when the book is the same."""
+    new = await author.revise(current_yaml, instruction(issue, prompt))
+    if yaml.safe_load(new) == yaml.safe_load(current_yaml):
+        raise author.AuthorError("Claude made no change to the book, so nothing was fixed. Edit the fix and try again.")
+    return new
