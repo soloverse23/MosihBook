@@ -364,3 +364,32 @@ def test_plan_shows_the_book_structure(client):
     s = client.get(f"/api/books/{slug}/plan").json()["structure"]
     assert [(x["kind"], x["pages"]) for x in s] == [("parents_note", 1), ("story", 3), ("coloring", 1), ("maze", 1)]
     assert s[2]["title"] == "Color the fox"
+
+
+def test_control_and_correction(client, monkeypatch):
+    slug = client.post("/api/books", json={"type": "picture_book", "idea": "a fox"}).json()["slug"]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": EXAMPLE.read_text()})
+    _wait(client, client.post(f"/api/books/{slug}/jobs/mock").json()["job"])
+    assert client.get(f"/api/books/{slug}/control").json() == {"report": None}
+
+    async def ask(prompt, system, schema=None, images=()):
+        return {"issues": [{"page": 6, "problem": "A word is misspelled.", "current": "tete",
+                            "replace_with": "tête", "fix": "text", "prompt": "Fix the spelling."},
+                           {"page": 6, "problem": "The fox holds no lantern.", "fix": "image",
+                            "prompt": "Show the lantern."}]} if len(images) and 6 in range(1, 99) and "page-006.png" in prompt else {"issues": []}
+
+    monkeypatch.setattr(author, "ask", ask)
+    r = client.post(f"/api/books/{slug}/control/check").json()["report"]
+    assert [i["page"] for i in r["issues"]] == [6, 6] and all(i["status"] == "open" for i in r["issues"])
+    a, b = r["issues"]
+    # one issue on a page can be ignored while the other stays
+    client.put(f"/api/books/{slug}/control/{a['id']}", json={"status": "ignored"})
+    rep = client.get(f"/api/books/{slug}/control").json()["report"]
+    assert [i["status"] for i in rep["issues"]] == ["ignored", "open"]
+
+    async def revise(yaml_text, instruction):
+        assert "page 6" in instruction
+        return yaml_text
+    monkeypatch.setattr(author, "revise", revise)
+    c = client.post(f"/api/books/{slug}/control/{b['id']}/apply", json={"prompt": "x"})
+    assert c.status_code in (200, 409)

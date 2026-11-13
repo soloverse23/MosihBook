@@ -35,7 +35,9 @@ def _unembedded_fonts(reader: PdfReader) -> set[str]:
 
 
 def lettering_problems(project: Project, errors: list, warnings: list) -> None:
-    """Words drawn by the image model can't be measured in the PDF; the art review read them instead."""
+    """Words drawn by the image model can't be measured in the PDF; the art review read them instead.
+    These are the reviewer's opinion, not KDP rules, so they are warnings: the user may ignore them and
+    publish the book as it is."""
     from .art.generate import serious_problems
     from .plan import plan
 
@@ -48,7 +50,7 @@ def lettering_problems(project: Project, errors: list, warnings: list) -> None:
     for s in slots:
         v = reviews.get(chosen.get(s.id, {}).get("key", ""), {}).get("verdict")
         if v and (problems := serious_problems(v, True)):
-            errors.append(f"{s.id}: " + "; ".join(problems) + " - redo it before uploading")
+            warnings.append(f"{s.id}: " + "; ".join(problems) + " - redo it before uploading")
 
 
 ON_DRAWING = 0.01  # share of a text box allowed to touch drawn art (anti-aliasing noise)

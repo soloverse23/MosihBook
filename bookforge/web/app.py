@@ -10,7 +10,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import author, characters, exports, kdp, settings, spec, templates
+from .. import author, characters, control, exports, kdp, settings, spec, templates
 from ..art.lint import lint
 from ..art.generate import review_notes, serious_problems
 from ..plan import plan
@@ -533,6 +533,67 @@ def get_job(job_id: str, since: int = 0):
     if not job:
         raise HTTPException(404)
     return job.view(since)
+
+
+@app.get("/api/books/{slug}/control")
+def control_report(slug: str):
+    """The last control & correction report of the built book (null before the first check)."""
+    d = _dir(slug)
+    try:
+        return {"report": control.view(Project(d / "book.yaml"))}
+    except Exception as e:
+        raise HTTPException(422, f"book.yaml is not valid: {e}")
+
+
+@app.post("/api/books/{slug}/control/check")
+async def control_check(slug: str):
+    """Claude reads every built page and lists the defects, each with the prompt that fixes it."""
+    d = _dir(slug)
+    p = Project(d / "book.yaml")
+    try:
+        await _claude(control.inspect(p))
+    except FileNotFoundError as e:
+        raise HTTPException(409, str(e))
+    return {"report": control.view(p)}
+
+
+@app.put("/api/books/{slug}/control/{issue_id}")
+def control_issue(slug: str, issue_id: str, body: dict = Body(...)):
+    if body.get("status") not in ("open", "ignored"):
+        raise HTTPException(400, "status must be open or ignored")
+    try:
+        control.set_status(Project(_dir(slug) / "book.yaml"), issue_id, body["status"])
+    except KeyError:
+        raise HTTPException(404)
+    return {"ok": True}
+
+
+@app.post("/api/books/{slug}/control/{issue_id}/apply")
+async def control_apply(slug: str, issue_id: str, body: dict = Body(default={})):
+    """Do the fix. A picture is redrawn with the prompt as its note (starts a job); a text or layout fix
+    rewrites book.yaml with Claude. Either way the book must be built again to show it."""
+    d = _dir(slug)
+    p = Project(d / "book.yaml")
+    issue = next((i for i in (control.load(p) or {"issues": []})["issues"] if i["id"] == issue_id), None)
+    if not issue:
+        raise HTTPException(404)
+    prompt = (body.get("prompt") or issue["prompt"]).strip()
+    if not prompt:
+        raise HTTPException(400, "write the fix first")
+    if issue["fix"] == "image":
+        if not settings.load().openai_api_key:
+            raise HTTPException(400, "add your OpenAI API key in Settings first")
+        try:
+            job = jobs.start(slug, "regen", slots=[issue["slot"]], note=prompt)
+        except (ValueError, RuntimeError) as e:
+            raise HTTPException(409, str(e))
+        control.set_status(p, issue_id, "applied", prompt)
+        return {"job": job.id, "slot": issue["slot"]}
+    current = state.read_yaml(slug)
+    text = await _claude(control.apply_text(current, f"On page {issue['page']} of the printed book: {prompt}"))
+    state.write_yaml(slug, text)
+    control.set_status(p, issue_id, "applied", prompt)
+    return {"yaml": True}
 
 
 @app.get("/api/books/{slug}/proofs")

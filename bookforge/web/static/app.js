@@ -3,7 +3,7 @@ import { royalty, inkForPaper, isLarge, SYMBOL, MARKET, PRICING_SOURCE } from ".
 const view = document.getElementById("view");
 const STEPS = [
   ["brief", "Brief"], ["questions", "Questions"], ["outline", "Outline"], ["manuscript", "Manuscript"],
-  ["art", "Art & build"], ["publish", "Publish"],
+  ["art", "Art & build"], ["control", "Control & correction"], ["publish", "Publish"],
 ];
 const TYPES = {
   picture_book: { label: "Picture book", icon: "image", trim: "8.5x8.5", paper: "premium_color", hint: "Ages 2–8 · art on every page" },
@@ -1189,7 +1189,7 @@ async function bookView(slug, step) {
       `<span class="spin"></span> ${esc(JOB_LABELS[b.job_kind] || "A job")} is running in the background. <a href="#/book/${slug}/${where}">Watch progress</a>`)}</div>`);
   }
   const steps = { brief: stepBrief, questions: stepQuestions, outline: stepOutline, manuscript: stepManuscript,
-    art: stepArt, publish: stepPublish };
+    art: stepArt, control: stepControl, publish: stepPublish };
   await steps[step]($("#step"), b, slug);
 }
 
@@ -1635,7 +1635,7 @@ async function stepArt(host, b, slug) {
           `Lays out interior.pdf and cover.pdf with the real art and checks them against KDP's rules (trim, bleed, margins, fonts, cover size).
            ${built === "mock" ? `<br><span class="faint">The last build used placeholder art.</span>` : ""}`,
           `<button class="btn ${built === "real" ? "" : "primary"}" id="build" ${left ? "disabled" : ""}>${icon("file")}${built === "real" ? "Build again" : "Build &amp; preflight"}</button>
-           ${built === "real" && preflight?.ok ? `<a class="btn primary" href="#/book/${slug}/publish">Download &amp; publish${icon("arrow")}</a>` : ""}`) + `
+           ${built === "real" && preflight?.ok ? `<a class="btn primary" href="#/book/${slug}/control">Next: control &amp; correction${icon("arrow")}</a>` : ""}`) + `
         <div id="pf"></div><div id="viewer"></div>`;
       if (preflight && built === "real") showPreflight(preflight);
       if (built === "real") spreadViewer($("#viewer"), slug);
@@ -1662,7 +1662,13 @@ async function stepArt(host, b, slug) {
         ${r.errors.map((e) => line("e", "x", e)).join("")}
         ${warns.map((w) => line("w", "alert", w, ignoreBtn(slug, `pf|${w}`))).join("")}
         ${r.ok ? `<li class="o">${icon("check")}<span>${r.pages} pages · ${esc(r.trim)} · fonts embedded · bleed, margins and cover size match KDP</span></li>` : ""}</ul>
-        ${r.errors.some((e) => fix(e).btn) ? `<p class="faint xs" style="margin-top:8px">After redrawing, press Build again to check the new images.</p>` : ""}</div></div>`;
+        ${warns.length > 1 ? `<div style="margin-top:8px"><button class="btn sm ghost" id="pf-ignore-all">Ignore all</button></div>` : ""}
+        ${[...r.errors, ...warns].some((e) => fix(e).btn) ? `<p class="faint xs" style="margin-top:8px">After redrawing, press Build again to check the new images.</p>` : ""}</div></div>`;
+    $("#pf-ignore-all")?.addEventListener("click", () => {
+      const s = ignoredSet(slug); warns.forEach((w) => s.add(`pf|${w}`));
+      try { localStorage.setItem(ignoreStore(slug), JSON.stringify([...s])); } catch {}
+      showPreflight(r);
+    });
     $$("[data-pfredo]", $("#pf")).forEach((btn) => (btn.onclick = () => ctx.redo(btn.dataset.pfredo, btn, btn.dataset.why)));
   };
   const loadReview = async () => {
@@ -1723,6 +1729,82 @@ async function stepArt(host, b, slug) {
   tab = { pilot: "art", art: "art", regen: "art", build: "build" }[b.job_kind] || auto();
   drawSteps(); drawPanel();
   if (b.job) follow(b.job, b.job_kind, `${JOB_LABELS[b.job_kind] || "Working"}…`, 0);
+}
+
+// ---------- control & correction: Claude proofreads the built book, page by page ----------
+const FIX_LABEL = { image: "Redraw the picture", text: "Fix the words", layout: "Fix the page layout" };
+
+async function stepControl(host, b, slug) {
+  const head = stepHead("Control & correction", "Claude reads every page of the built book, lists the real problems and writes the fix for each one.");
+  if (b.last_build !== "real") {
+    host.innerHTML = head + note("info", `Build the book first: the check reads the finished pages. <a href="#/book/${slug}/art">Go to Art &amp; build</a>`);
+    return;
+  }
+  let report = (await api("GET", `/api/books/${slug}/control`)).report, running = false;
+  host.innerHTML = head + `<div class="stack">${jobPanel("Working…")}<div class="stack" id="ctl"></div></div>`;
+  const go = (fn) => async (e) => { if (running) return; running = true; try { await fn(e.currentTarget); } finally { running = false; if (host.isConnected) draw(); } };
+  const reload = async () => { report = (await api("GET", `/api/books/${slug}/control`)).report; };
+  const check = (btn) => busy(btn, "Reading the pages…", async () => { report = (await api("POST", `/api/books/${slug}/control/check`)).report; });
+  const png = (n) => `/api/books/${slug}/build/proofs/page-${String(n).padStart(3, "0")}.png`;
+
+  function issueHtml(i) {
+    const done = i.status === "applied";
+    return `<div class="ctl-issue ${i.status}">
+      <div class="row gap2"><span class="badge ${i.fix === "image" ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span>${done ? `<span class="badge ok">Fixed: rebuild to see it</span>` : ""}</div>
+      <p class="ctl-problem">${esc(i.problem)}</p>
+      ${i.replace_with ? `<p class="ctl-swap">${i.current ? `<s>${esc(i.current)}</s> → ` : ""}<b>${esc(i.replace_with)}</b></p>` : ""}
+      ${done ? "" : `<textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
+      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}">${icon(i.fix === "image" ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
+        <button class="btn sm ghost" data-skip="${i.id}">Ignore</button></div>`}</div>`;
+  }
+
+  function draw() {
+    const box = $("#ctl");
+    if (!report) {
+      box.innerHTML = `<div class="card act"><div class="act-b"><h3>Check the book</h3>
+        <p>Claude looks at every page for real mistakes: spelling, cut or crowded text, pictures that contradict the words. It changes nothing by itself.</p></div>
+        <div class="act-a"><button class="btn primary" id="check">${icon("eye")}Check every page</button></div></div>`;
+      $("#check").onclick = go(check);
+      return;
+    }
+    const open = report.issues.filter((i) => i.status !== "ignored");
+    const todo = open.filter((i) => i.status === "open").length;
+    const pages = [...new Set(open.map((i) => i.page))];
+    box.innerHTML = `<div class="card"><div class="card-b row between">
+        <div>${open.length ? `<b>${todo} to fix</b>${open.length > todo ? ` · ${open.length - todo} fixed` : ""}` : `<b>No problems found</b>`}
+          <span class="faint small"> · ${report.pages} pages read</span></div>
+        <div class="row gap2">
+          ${report.rebuild ? `<button class="btn primary" id="rebuild">${icon("file")}Rebuild the book</button>` : ""}
+          <button class="btn" id="check">${icon("refresh")}Check again</button>
+          ${!todo && !report.rebuild ? `<a class="btn primary" href="#/book/${slug}/publish">Next: publish${icon("arrow")}</a>` : ""}</div></div></div>`
+      + pages.map((n) => `<div class="card"><div class="card-b ctl-page">
+        <a href="${png(n)}" target="_blank" rel="noopener"><img src="${png(n)}?${Math.round(report.checked)}" alt="Page ${n}" loading="lazy"></a>
+        <div class="stack"><h3>Page ${n}</h3>${open.filter((i) => i.page === n).map(issueHtml).join("")}</div></div></div>`).join("");
+    $("#check").onclick = go(check);
+    $("#rebuild")?.addEventListener("click", go(async () => {
+      const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
+      await watchJob(job, "Building print files…", 0);
+      await reload();
+    }));
+    $$("[data-skip]", box).forEach((btn) => (btn.onclick = go(async () => {
+      await api("PUT", `/api/books/${slug}/control/${btn.dataset.skip}`, { status: "ignored" }); await reload();
+    })));
+    $$("[data-apply]", box).forEach((btn) => (btn.onclick = go(async () => {
+      const i = report.issues.find((x) => x.id === btn.dataset.apply);
+      const prompt = $(`[data-prompt="${i.id}"]`, box).value.trim();
+      if (i.fix === "image") {
+        if (!(await modal({ title: "Redraw this picture?", body: `Draws ${esc(i.slot)} once more with your fix: about ${money(i.cost_usd || 0)}.<br><br>This uses the OpenAI image API and costs real money.`, confirm: "Redraw" }))) return;
+        try {
+          const { job } = await api("POST", `/api/books/${slug}/control/${i.id}/apply`, { prompt });
+          await watchJob(job, `Redrawing ${i.slot}…`, 1);
+        } catch (e) { toast(e.message, true); return; }
+      } else {
+        await busy(btn, "Fixing…", () => api("POST", `/api/books/${slug}/control/${i.id}/apply`, { prompt }));
+      }
+      await reload();
+    })));
+  }
+  draw();
 }
 
 // Download formats on the Publish step: [file, title, kind, what it's for, icon]

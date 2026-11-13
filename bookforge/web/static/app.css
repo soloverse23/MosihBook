@@ -926,3 +926,13 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
   .split.pub { grid-template-columns: minmax(0, 1fr); }
   .split.pub > aside { order: -1; }  /* one column: the other-language card first, not under the listing */
 }
+
+/* control & correction */
+.ctl-page { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: var(--s5); align-items: start; }
+.ctl-page img { width: 100%; display: block; border: 1px solid var(--line); border-radius: var(--r); }
+.ctl-issue { display: grid; gap: var(--s2); padding-bottom: var(--s4); border-bottom: 1px solid var(--line); }
+.ctl-issue:last-child { border-bottom: 0; padding-bottom: 0; }
+.ctl-issue.applied { opacity: .7; }
+.ctl-problem { margin: 0; color: #B91C1C; font-weight: 600; }
+.ctl-swap { margin: 0; } .ctl-swap s { color: #B91C1C; } .ctl-swap b { color: #15803D; }
+@media (max-width: 640px) { .ctl-page { grid-template-columns: 1fr; } .ctl-page img { max-width: 220px; } }

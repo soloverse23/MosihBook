@@ -158,7 +158,7 @@ def test_characters_are_locked_and_reused(tmp_path):
     assert "red cap" in yaml.safe_load((entry / "character.yaml").read_text())["description"]
 
 
-def test_preflight_blocks_misspelled_lettering(tmp_path):
+def test_misspelled_lettering_warns_but_does_not_block(tmp_path):
     import json
     shutil.copy(EXAMPLES / "picture-book" / "book.yaml", tmp_path / "book.yaml")
     p = Project(tmp_path / "book.yaml", mock=True)
@@ -172,7 +172,8 @@ def test_preflight_blocks_misspelled_lettering(tmp_path):
     reviews[key]["verdict"]["text_errors"] = ["'Wilowmere' should be 'Willowmere'"]
     f.write_text(json.dumps(reviews))
     report = check(p)
-    assert not report["ok"] and any("p002" in e and "Wilowmere" in e for e in report["errors"])
+    assert report["ok"] and not report["errors"]
+    assert any("p002" in w and "Wilowmere" in w for w in report["warnings"])
 
 
 def test_page_numbers_can_be_switched_off(tmp_path):
