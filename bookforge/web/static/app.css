@@ -880,6 +880,8 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 
 /* ---------- publish: download formats and other-language editions ---------- */
 .split.pub { grid-template-columns: minmax(0, 1fr) 320px; }
+.split.pub > * { min-width: 0; }  /* a wide child must not spill over the language card beside it */
+.split.pub > .stack { grid-template-columns: minmax(0, 1fr); }
 .pub-group { display: grid; gap: var(--s3); }
 .pub-gh { display: grid; gap: 2px; }
 .pub-gh h3 { font-size: 15px; }
@@ -922,9 +924,9 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 .ed.here { background: var(--accent-soft); }
 .ed-lang { font-weight: 600; }
 .ed-t { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 1080px) {
+@media (max-width: 1240px) {
   .split.pub { grid-template-columns: minmax(0, 1fr); }
-  .split.pub > aside { order: -1; }  /* one column: the other-language card first, not under the listing */
+  .split.pub > aside { order: -1; position: static; }  /* one column: the other-language card first, not under the listing */
 }
 
 /* control & correction */
