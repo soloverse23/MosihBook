@@ -75,9 +75,14 @@ def needs_text_frame(book: Book) -> bool:
                and not own_border(book, p))
 
 
+OWN_BORDER_KINDS = {"theme_intro", "reference"}
+
+
 def own_border(book: Book, p) -> bool:
-    """A typeset learning page of a text_in_art storybook gets its own border, drawn from its examples."""
-    return book.type == "storybook" and book.images.text_in_art and p.kind == "reference" and not p.prompt
+    """A typeset learning page (lesson intro, reference) of a text_in_art storybook gets its own border, drawn
+    from its examples: the art holds the words in its empty middle, they never land on the drawing."""
+    return (book.type == "storybook" and book.images.text_in_art and p.kind in OWN_BORDER_KINDS
+            and not p.prompt)
 
 
 def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:

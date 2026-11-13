@@ -173,7 +173,7 @@ def _finds(project: Project) -> dict[str, list[str]]:
 
 
 BACK_SCALES = (1.0, 0.92, 0.85, 0.78, 0.72)
-BACK_KINDS = {"solutions", "copyright", "reference"}  # set as a whole, centred: answers, editorial, lessons
+BACK_KINDS = {"solutions", "copyright", "reference", "theme_intro"}  # set as a whole, centred: answers, editorial, lessons
 
 
 def back_matter(sheet: Sheet, book, p: Page, scale: float = 1.0) -> list:
@@ -184,7 +184,7 @@ def back_matter(sheet: Sheet, book, p: Page, scale: float = 1.0) -> list:
     t = sheet.theme
     intro = sheet.style(t.size * scale, align=TA_CENTER, leading=1.45)
     intro.spaceAfter = 10 * scale
-    if p.kind == "reference":
+    if p.kind in ("reference", "theme_intro"):
         return tables.learning_page(sheet, p.text, scale)
     if p.kind == "solutions":
         out = [Paragraph(para_html(x, sheet.mark_color), intro) for x in p.text.split("\n\n") if x.strip()]
