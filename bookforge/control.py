@@ -48,8 +48,9 @@ Rules:
 - `fix` says what repairs it:
     "image"  - the picture itself must be redrawn (wrong content, or words that are part of the picture);
     "margin" - words or a face drawn into the picture are right but come too close to the page edge (within
-               about 1 cm of the edge, where the printer trims): the picture is kept as it is and fitted inside
-               the safe margin, no redraw. Use it whenever the only problem is closeness to the edge;
+               about 1 cm of the edge, where the printer trims): the picture is drawn again from its current
+               version with the same content, laid out inside the safe margin. Use it whenever the only problem
+               is closeness to the edge;
     "text"   - the words in the manuscript must change (spelling, wording);
     "layout" - the words are right but their place, size, alignment or line breaks are wrong.
   When the manuscript text is not known for a page, its words are part of the picture: use "image" (or

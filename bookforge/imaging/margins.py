@@ -1,37 +1,34 @@
-"""Fit a page picture inside the safe margin without redrawing it.
+"""Redraw a page picture so its words sit inside the safe margin.
 
-Words the image model letters into a picture often run to its edge, where the trim may cut them. Redrawing
-the picture would change it; instead the picture is kept exactly as it is, shrunk so all of it (every letter
-included) sits inside the page's live area (kdp.Interior.art_live_box: 9.7 mm from the trim, gutter and
-bleed accounted for), and only the new border around it is painted by the image model, as scenery. The
-original is pasted back over the middle afterwards, so its words and characters cannot change.
+Words the image model letters into a picture often run to its edge, where the trim may cut them. To fix a
+page, the current picture is shrunk into the page's live area (kdp.Interior.art_live_box: 9.7 mm from the
+trim, gutter and bleed accounted for) on a page-shaped draft, its outer band only a soft blur of the picture.
+That draft goes to the image model as the layout of the page, and the model draws the whole page again as one
+new picture: same scene, characters and words, every letter where the draft has it, inside the margin.
+Nothing of the old picture is pasted back, so there is no seam.
 
-The first fit keeps the untouched picture in build/art-originals/; a refit always starts from it, and a
-Redo (a new picture) drops it. build/margins.json lists the fitted pictures and the box they were fitted to.
+The first redraw keeps the untouched picture in build/art-originals/ and drafts always start from it, so a
+second redraw is not a copy of a copy. A Redo without the margin option drops it.
 """
 from __future__ import annotations
 
-import io
 import json
 import re
 import shutil
-from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image, ImageFilter
 
-from .. import kdp, settings as app_settings
+from .. import kdp
 from ..project import Project
 
-FEATHER = 0.004   # share of the picture's short side over which the original blends into the new border
-
-EXTEND_PROMPT = (
-    "Extend this illustration outward so it fills the whole page. The picture in the middle is finished: keep "
-    "it exactly as it is (same scene, characters, colors and words). Paint only the empty border around it, "
-    "continuing the scenery seamlessly to every edge in the same style, colors and light, so the page reads as "
-    "one full-bleed illustration with no frame and no visible seam. The border carries only background "
-    "(sky, ground, water, foliage, walls, texture): no words, letters or numbers, no faces, no new characters "
-    "or objects.")
+DRAFT_ROLE = ("layout draft of THIS page, made from its previous picture. Redraw it as one finished full-bleed "
+              "illustration: keep the same scene, characters, poses and every word where the draft has them, "
+              "at the same size. The draft's soft blurred outer band is only a placeholder: paint it as real "
+              "scenery that continues the picture to every edge, with no words, faces or important details in "
+              "it. Do not copy the blur, and do not add a frame or border.")
+MARGIN_NOTE = ("Every letter, and every face, stays inside the sharp middle area of the layout draft, never in its "
+               "blurred outer band: the page is trimmed there and words near the edge get cut.")
 
 # a Redo note that asks only to keep things inside the margin (any of the studio's languages)
 _MARGIN_WORDS = re.compile(
@@ -53,17 +50,13 @@ def _store_path(project: Project) -> Path:
     return project.build / ("margins-mock.json" if project.mock else "margins.json")
 
 
-def fitted(project: Project) -> dict:
-    f = _store_path(project)
-    return json.loads(f.read_text()) if f.exists() else {}
-
-
 def forget(project: Project, slot_id: str) -> None:
-    """A new picture replaced this slot's art: its old original and fit no longer apply."""
+    """A new picture replaced this slot's art (a Redo): its kept original no longer applies."""
     (project.build / "art-originals" / f"{slot_id}.png").unlink(missing_ok=True)
-    data = fitted(project)
-    if data.pop(slot_id, None) is not None:
-        _store_path(project).write_text(json.dumps(data, indent=2))
+    f = _store_path(project)  # left by the border-only fit of v0.1.13
+    if f.exists() and slot_id in (data := json.loads(f.read_text())):
+        data.pop(slot_id)
+        f.write_text(json.dumps(data, indent=2))
 
 
 def placement(project: Project, slot_id: str) -> dict | None:
@@ -95,9 +88,8 @@ def needs_fit(p: dict) -> bool:
     return lx - bx > 1e-3 or ly - by > 1e-3 or (bx + bw) - (lx + lw) > 1e-3 or (by + bh) - (ly + lh) > 1e-3
 
 
-def _canvas(orig: Image.Image, box: list[float], live: list[float]):
-    """The page picture at box aspect with the original contained in the live area, its border prefilled with a
-    soft stretch of the original. Returns (canvas, keep mask, paste position)."""
+def _canvas(orig: Image.Image, box: list[float], live: list[float]) -> Image.Image:
+    """The page at box aspect with the picture contained in the live area, its outer band a soft blur of it."""
     bx, by, bw, bh = box
     lx, ly, lw, lh = live
     # live area as fractions of the box, top-left origin (the PDF counts from the bottom)
@@ -105,66 +97,28 @@ def _canvas(orig: Image.Image, box: list[float], live: list[float]):
     fw, fh = lw / bw, lh / bh
     ow, oh = orig.size
     aspect = bw / bh
-    # keep the original at its own pixels: the page grows around it
     W = max(ow / fw, oh / fh * aspect)
     W, H = round(W), round(W / aspect)
     lpx, lpy, lpw, lph = fx * W, fy * H, fw * W, fh * H
     px, py = round(lpx + (lpw - ow) / 2), round(lpy + (lph - oh) / 2)
     canvas = orig.resize((W, H), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(W, H) / 60))
     canvas.paste(orig, (px, py))
-    keep = Image.new("L", (W, H), 0)
-    keep.paste(255, (px, py, px + ow, py + oh))
-    return canvas, keep, (px, py)
+    return canvas
 
 
-def _png(im: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    im.save(buf, "PNG")
-    return buf.getvalue()
-
-
-def fit(project: Project, slot_id: str, provider, log: Callable[[str], None] = print) -> str:
-    """Fit one slot's picture inside the margin. Returns a short result for the job log."""
+def draft(project: Project, slot_id: str) -> Path | None:
+    """Write the layout draft for redrawing a slot inside the margin; None when it cannot be made (no picture,
+    not a single-page picture in the last build, or already inside the live area)."""
     p = placement(project, slot_id)
-    if p is None:
-        return "skipped: not a single-page picture in the last build (build the book first)"
-    if not needs_fit(p):
-        return "already inside the margin"
     art = project.art_path(slot_id)
-    if not art.exists():
-        return "skipped: no picture yet"
+    if p is None or not needs_fit(p) or not art.exists():
+        return None
     orig_path = originals_dir(project) / f"{slot_id}.png"
     if not orig_path.exists():
         shutil.copyfile(art, orig_path)
     with Image.open(orig_path) as im:
-        orig = im.convert("RGB")
-    canvas, keep, (px, py) = _canvas(orig, p["box"], p["live"])
-    W, H = canvas.size
-
-    settings = project.book.images
-    size = provider.request_size(W / H)
-    mask = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    mask.putalpha(keep)  # alpha 255 = keep, 0 = paint
-    prompt = f"{EXTEND_PROMPT}\nART STYLE: {project.book.style.strip()}"
-    out = provider.extend(_png(canvas.resize(size, Image.LANCZOS)), _png(mask.resize(size, Image.NEAREST)),
-                          prompt, size, settings.quality_for(slot_id))
-    if not project.mock:
-        app_settings.record_spend(settings.cost(slot_id), project.root.name, f"{slot_id}-margin")
-    with Image.open(io.BytesIO(out)) as im:
-        page = im.convert("RGB").resize((W, H), Image.LANCZOS)
-
-    # the original goes back on top; only its outermost pixels blend into the painted border
-    f = max(2, round(min(orig.size) * FEATHER))
-    blend = Image.new("L", (W, H), 0)
-    blend.paste(255, (px + f, py + f, px + orig.width - f, py + orig.height - f))
-    blend = blend.filter(ImageFilter.GaussianBlur(f / 2))
-    page.paste(canvas, (0, 0), blend)
-    tmp = art.with_suffix(".part.png")
-    page.save(tmp, "PNG")
-    tmp.replace(art)
-
-    data = fitted(project)
-    data[slot_id] = {"page": p["page"], "box": p["box"], "live": p["live"], "size": [W, H]}
-    _store_path(project).write_text(json.dumps(data, indent=2))
-    return f"fitted inside the {kdp.SAFE * 25.4:.1f} mm margin (picture kept, border extended)"
-
+        canvas = _canvas(im.convert("RGB"), p["box"], p["live"])
+    out = project.build / "margin-drafts" / f"{slot_id}.png"
+    out.parent.mkdir(exist_ok=True)
+    canvas.save(out, "PNG")
+    return out

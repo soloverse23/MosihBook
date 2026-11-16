@@ -33,16 +33,18 @@ char_slot_id = characters.char_id
 # a Redo steps the variation counter past every key an older run may have used (up to 3 attempts per image),
 # so the redone image is always a fresh one
 REDO_STEP = 3
-MARGIN_PROBLEM = "words too close to the page edge (inside the 9.7 mm margin) - use Fit inside the margin"
+MARGIN_PROBLEM = "words too close to the page edge (inside the 9.7 mm margin) - redraw it inside the margin"
 
 
 def run(project: Project, only: set[str] | None = None, bump: set[str] = frozenset(),
         notes: dict[str, str] | None = None, pilot: int = 0,
+        drafts: dict[str, Path] | None = None,
         log: Callable[[str], None] = console.print,
         progress: Callable[[str, str, object], None] | None = None) -> dict:
     """Generate all missing art. `only` limits to slot ids; `bump` forces fresh variations;
     `notes` adds an art-director note to a slot (kept for future runs); `pilot` limits the
-    run to characters + cover + the first N illustrations.
+    run to characters + cover + the first N illustrations. `drafts` maps slot ids (also in `bump`) to a layout
+    draft of their page (imaging.margins): the picture is drawn again from it, inside the margin.
     `progress(event, slot_id, info)` gets "total" (info = image count), "phase" (slot_id = group title),
     "start" and "done" (info = the result text) so a UI can show each image as it lands."""
     progress = progress or (lambda *a: None)
@@ -101,15 +103,21 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
                 shutil.copyfile(sheet, project.art_path(slot.id))
             return "locked in the character directory (no cost)"
         refs = refs_for(slot, previous)
+        # the page's own prompt, without a one-off margin draft: what later runs compare against
+        prompt_id = hashlib.sha256(prompting.with_refs(slot.prompt, refs, note_store.data.get(slot.id))
+                                   .encode()).hexdigest()[:16]
+        note = note_store.data.get(slot.id)
+        if (d := (drafts or {}).get(slot.id)) and slot.id in bump:
+            refs = [prompting.Ref(d, margins.DRAFT_ROLE)] + refs[:MAX_REFS - 1]
+            note = " ".join(x for x in (note, margins.MARGIN_NOTE) if x)
         size = provider.request_size(slot.aspect)
         quality = settings.quality_for(slot.id)
         # the default quality keeps the old cache keys, so switching it never re-buys existing art
         model_key = provider.model if quality == settings.quality else f"{provider.model}@{quality}"
         base = variations.data.get(slot.id, 0)
-        prompt = prompting.with_refs(slot.prompt, refs, note_store.data.get(slot.id))
+        prompt = prompting.with_refs(slot.prompt, refs, note)
         keys = [request_key(model_key, prompt, size, [r.path for r in refs], base + n) for n in range(REDO_STEP)]
         chosen = reviews.data.get("_chosen", {}).get(slot.id, {})
-        prompt_id = hashlib.sha256(prompt.encode()).hexdigest()[:16]
         # paid art is never redrawn on its own: only a Redo (bump) replaces an existing image
         if not project.mock and slot.id not in bump and project.art_path(slot.id).exists():
             if chosen.get("prompt", prompt_id) != prompt_id:
@@ -139,7 +147,8 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
             best = reviewer.review(cached, prompt, refs, slot.expected_text)
             reviews.data[key] = {"slot": slot.id, "verdict": best}
         shutil.copyfile(cached, project.art_path(slot.id))
-        margins.forget(project, slot.id)
+        if slot.id not in (drafts or {}):  # a margin redraw keeps the first original for the next draft
+            margins.forget(project, slot.id)
         if slot.kind == "character":
             characters.lock(project, by_name[slot.id], project.art_path(slot.id))
         reviews.data.setdefault("_chosen", {})[slot.id] = {"key": key, "attempts": 1, "prompt": prompt_id}

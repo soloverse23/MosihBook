@@ -298,7 +298,7 @@ const dur = (sec) => sec < 60 ? `${Math.max(1, Math.round(sec))}s` : sec < 3600 
 // a note or problem that is only about the page edge (the studio's languages)
 const MARGIN_MSG = /margin|marge|\brand\b|safe.?(area|zone)|bleed|trim|edge|too close|cut off|حاشیه|مارجین|لبه|کناره|بریده|برش/i;
 const JOB_LABELS = { mock: "Building preview", pilot: "Generating pilot", art: "Generating art",
-  regen: "Redrawing image", build: "Building print files", margins: "Fitting pictures inside the margin" };
+  regen: "Redrawing image", build: "Building print files", margins: "Redrawing pictures inside the margin" };
 
 // one tile in the live grid: a finished image, a failed one, or one being drawn right now
 function liveTile(slug, id, im) {
@@ -1663,9 +1663,9 @@ async function stepArt(host, b, slug) {
       const m = /^([\w-]+):\s*(.*)$/.exec(msg);
       const s = m && p.slots.find((x) => x.id === m[1]);
       if (!s) return { text: esc(msg), btn: "" };
-      const why = m[2].replace(/\s*-\s*(redo it before uploading|fit it inside the margin( again)?)\.?$/i, "");
+      const why = m[2].replace(/\s*-\s*(redo it before uploading|(fit|redraw) it inside the margin( again)?)\.?$/i, "");
       if (MARGIN_MSG.test(m[2])) return { text: `<b>${esc(slotName(s))}</b> · ${esc(why)}`, fit: s.id,
-        btn: `<button class="btn sm pf-redo" data-pffit="${esc(s.id)}" title="Keeps this picture: shrinks it inside the margin and paints only the border">${icon("sparkle")}Fit inside the margin</button>` };
+        btn: `<button class="btn sm pf-redo" data-pffit="${esc(s.id)}" title="Draws this page again from its current picture: same scene and words, laid out inside the 9.7 mm margin">${icon("refresh")}Redraw inside the margin</button>` };
       return { text: `<b>${esc(slotName(s))}</b> · ${esc(why)}`,
         btn: `<button class="btn sm pf-redo" data-pfredo="${esc(s.id)}" data-why="${esc(why)}">${icon("refresh")}Redo</button>` };
     };
@@ -1676,7 +1676,7 @@ async function stepArt(host, b, slug) {
         ${r.errors.map((e) => line("e", "x", e)).join("")}
         ${warns.map((w) => line("w", "alert", w, ignoreBtn(slug, `pf|${w}`))).join("")}
         ${r.ok ? `<li class="o">${icon("check")}<span>${r.pages} pages · ${esc(r.trim)} · fonts embedded · bleed, margins and cover size match KDP</span></li>` : ""}</ul>
-        ${toFit.length > 1 ? `<div style="margin-top:8px"><button class="btn sm" id="pf-fit-all">${icon("sparkle")}Fit all ${toFit.length} inside the margin · ~${money(fitCost(toFit))}</button></div>` : ""}
+        ${toFit.length > 1 ? `<div style="margin-top:8px"><button class="btn sm" id="pf-fit-all">${icon("refresh")}Redraw all ${toFit.length} inside the margin · ~${money(fitCost(toFit))}</button></div>` : ""}
         ${warns.length > 1 ? `<div style="margin-top:8px"><button class="btn sm ghost" id="pf-ignore-all">Ignore all</button></div>` : ""}
         ${[...r.errors, ...warns].some((e) => fix(e).btn) ? `<p class="faint xs" style="margin-top:8px">After redrawing, press Build again to check the new images.</p>` : ""}</div></div>`;
     $("#pf-ignore-all")?.addEventListener("click", () => {
@@ -1728,12 +1728,12 @@ async function stepArt(host, b, slug) {
   });
   const cost = (title, body) => modal({ title, body: `${body}<br><br>This uses the OpenAI image API and costs real money.`, confirm: "Generate" });
   const fitCost = (ids) => ids.reduce((a, id) => a + (p.slots.find((s) => s.id === id)?.cost_usd || p.base_cost_usd), 0);
-  // keep the pictures and fit them inside the margin (one border painted per picture), then rebuild
+  // draw the pictures again from their current version, laid out inside the margin (one image each), then rebuild
   ctx.fit = async (ids, btn, confirmed = false) => {
-    if (!confirmed && !(await modal({ title: ids.length > 1 ? `Fit ${ids.length} pictures inside the margin?` : `Fit ${slotName({ id: ids[0] })} inside the margin?`,
-      body: `Each picture is kept as it is, words included, and shrunk just enough to sit inside the 9.7 mm margin; the image model paints only the new border around it. About ${money(fitCost(ids))}, then the book is built again.<br><br>This uses the OpenAI image API and costs real money.`,
-      confirm: "Fit" }))) return;
-    run(btn, "margins", { slots: ids }, ids.length > 1 ? "Fitting pictures inside the margin…" : `Fitting ${slotName({ id: ids[0] })}…`, ids.length);
+    if (!confirmed && !(await modal({ title: ids.length > 1 ? `Redraw ${ids.length} pictures inside the margin?` : `Redraw ${slotName({ id: ids[0] })} inside the margin?`,
+      body: `Each page is drawn again as one new picture, from its current picture: same scene, characters and words, laid out so everything sits inside the 9.7 mm margin. The new picture is checked again (spelling and margin). About ${money(fitCost(ids))}, then the book is built again.<br><br>This uses the OpenAI image API and costs real money.`,
+      confirm: "Redraw" }))) return;
+    run(btn, "margins", { slots: ids }, ids.length > 1 ? "Redrawing pictures inside the margin…" : `Redrawing ${slotName({ id: ids[0] })} inside the margin…`, ids.length);
   };
   ctx.redo = async (id, btn, prefill = "") => {
     const slot = p.slots.find((s) => s.id === id);
@@ -1743,7 +1743,7 @@ async function stepArt(host, b, slug) {
       fields: `<div class="field"><label for="m-note">What should change?</label>
         <textarea class="input" id="m-note" name="note" rows="3" required placeholder="Pip smaller, facing left, softer light. Spell 'wiggles' with two g's.">${esc(prefill)}</textarea></div>
         <label class="check"><input type="checkbox" name="high" ${isHigh ? "checked" : ""}> High quality (~${money(p.high_cost_usd)} instead of ~${money(p.base_cost_usd)})</label>
-        <label class="check"><input type="checkbox" name="keep" ${MARGIN_MSG.test(prefill) ? "checked" : ""}> Only fit it inside the 9.7 mm margin: keep this picture and its words, paint just the border</label>` });
+        <label class="check"><input type="checkbox" name="keep" ${MARGIN_MSG.test(prefill) ? "checked" : ""}> Inside the 9.7 mm margin: draw it again from this picture (same scene and words), laid out inside the margin</label>` });
     if (!v) return;
     if (v.keep) return ctx.fit([id], btn, true);
     if (!!v.high !== isHigh) p = ctx.p = await api("PUT", `/api/books/${slug}/high`, { slots: [id], on: !!v.high });
@@ -1759,7 +1759,7 @@ async function stepArt(host, b, slug) {
 }
 
 // ---------- control & correction: Claude proofreads the built book, page by page ----------
-const FIX_LABEL = { image: "Redraw the picture", margin: "Fit inside the margin", text: "Fix the words", layout: "Fix the page layout" };
+const FIX_LABEL = { image: "Redraw the picture", margin: "Redraw inside the margin", text: "Fix the words", layout: "Fix the page layout" };
 const PAID_FIX = new Set(["image", "margin"]);
 
 async function stepControl(host, b, slug) {
@@ -1882,7 +1882,7 @@ async function stepControl(host, b, slug) {
   async function applyOne(it) {
     const i = report.issues.find((x) => x.id === it.id);
     const r = await api("POST", `/api/books/${slug}/control/${it.id}/apply`, { prompt: it.prompt });
-    if (r.job) await watchJob(r.job, `${i.fix === "margin" ? "Fitting" : "Redrawing"} ${i.slot}…`, 1);
+    if (r.job) await watchJob(r.job, `Redrawing ${i.slot}${i.fix === "margin" ? " inside the margin" : ""}…`, 1);
   }
 
   let pumping = false;
@@ -1937,7 +1937,7 @@ async function stepControl(host, b, slug) {
   const redrawNote = (list) => {
     const n = (f) => list.filter((i) => i.fix === f).length, pl = (k) => (k > 1 ? "s" : "");
     const parts = [n("image") ? `${n("image")} picture${pl(n("image"))} will be redrawn` : "",
-      n("margin") ? `${n("margin")} picture${pl(n("margin"))} will be kept and fitted inside the 9.7 mm margin (only the border is painted)` : ""].filter(Boolean);
+      n("margin") ? `${n("margin")} picture${pl(n("margin"))} will be redrawn from their current picture, inside the 9.7 mm margin` : ""].filter(Boolean);
     return `${parts.join("; ")}: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
   };
 
@@ -1968,7 +1968,7 @@ async function stepControl(host, b, slug) {
     if (t.dataset.unq) { queue.splice(queue.findIndex((q) => q.id === t.dataset.unq), 1); refreshIssue(t.dataset.unq); return drawHead(); }
     if (t.dataset.apply) {
       const i = report.issues.find((x) => x.id === t.dataset.apply);
-      if (PAID_FIX.has(i.fix) && !(await modal({ title: i.fix === "margin" ? "Fit this picture inside the margin?" : "Redraw this picture?", body: redrawNote([i]), confirm: i.fix === "margin" ? "Fit" : "Redraw" }))) return;
+      if (PAID_FIX.has(i.fix) && !(await modal({ title: i.fix === "margin" ? "Redraw this picture inside the margin?" : "Redraw this picture?", body: redrawNote([i]), confirm: "Redraw" }))) return;
       return enqueue(i.id);
     }
     if (t.dataset.pageapply) {

@@ -14,10 +14,6 @@ class ImageProvider(Protocol):
     def generate(self, prompt: str, size: tuple[int, int], refs: list[Path], quality: str | None = None) -> bytes:
         """Return PNG/JPEG bytes. `refs` are reference images for character consistency."""
 
-    def extend(self, image: bytes, mask: bytes, prompt: str, size: tuple[int, int],
-               quality: str | None = None) -> bytes:
-        """Repaint the transparent area of `mask` over `image` (PNG bytes in and out)."""
-
 
 def get_provider(settings) -> ImageProvider:
     if settings.provider == "mock":

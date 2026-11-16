@@ -55,31 +55,23 @@ def lettering_problems(project: Project, errors: list, warnings: list) -> None:
 
 def lettering_margins(project: Project, errors: list) -> None:
     """Words drawn into a picture must stay inside the 9.7 mm margin. The art review measured each lettered
-    picture; one that came too close to an edge is an error until it is fitted inside the margin
-    (imaging.margins), and a fitted picture whose page has since grown a wider gutter needs fitting again."""
+    picture; one that came too close to an edge is an error until it is redrawn inside the margin
+    (imaging.margins), when the review of the new picture decides again."""
     from .imaging import margins
     from .plan import plan
 
     f = project.build / ("review-mock.json" if project.mock else "review.json")
     reviews = json.loads(f.read_text()) if f.exists() else {}
     chosen = reviews.get("_chosen", {})
-    done = margins.fitted(project)
     for s in plan(project.book):
         if not s.lettering or not (p := margins.placement(project, s.id)) or not margins.needs_fit(p):
-            continue
-        if s.id in done:
-            lx, ly, lw, lh = p["live"]
-            fx, fy, fw, fh = done[s.id]["live"]
-            if fx < lx - 1e-3 or fy < ly - 1e-3 or fx + fw > lx + lw + 1e-3 or fy + fh > ly + lh + 1e-3:
-                errors.append(f"{s.id}: {MARGIN_REFIT}")
             continue
         v = reviews.get(chosen.get(s.id, {}).get("key", ""), {}).get("verdict")
         if v and not v.get("text_in_safe_area", True):
             errors.append(f"{s.id}: {MARGIN_FIT}")
 
 
-MARGIN_FIT = "words too close to the page edge (inside the 9.7 mm margin) - fit it inside the margin"
-MARGIN_REFIT = "the page's margin grew since this picture was fitted - fit it inside the margin again"
+MARGIN_FIT = "words too close to the page edge (inside the 9.7 mm margin) - redraw it inside the margin"
 
 
 ON_DRAWING = 0.01  # share of a text box allowed to touch drawn art (anti-aliasing noise)

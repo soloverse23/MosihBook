@@ -195,14 +195,13 @@ def test_picture_books_and_comics_print_page_numbers(tmp_path, example):
     assert not [t for t in build_interior(p)["text"] if t.get("folio")]
 
 
-def test_lettering_near_the_edge_is_fitted_inside_the_margin_keeping_the_picture(tmp_path):
+def test_lettering_near_the_edge_is_redrawn_inside_the_margin_from_a_draft(tmp_path):
     import json
 
     from PIL import Image
 
     from bookforge import kdp
     from bookforge.imaging import margins
-    from bookforge.providers.mock import MockProvider
 
     shutil.copy(EXAMPLES / "picture-book" / "book.yaml", tmp_path / "book.yaml")
     p = Project(tmp_path / "book.yaml", mock=True)
@@ -215,27 +214,22 @@ def test_lettering_near_the_edge_is_fitted_inside_the_margin_keeping_the_picture
     reviews[reviews["_chosen"][sid]["key"]]["verdict"]["text_in_safe_area"] = False
     f.write_text(json.dumps(reviews))
     assert any(e.startswith(f"{sid}:") and "margin" in e for e in check(p)["errors"])
-
-    before = Image.open(p.art_path(sid)).convert("RGB")
-    assert "fitted" in margins.fit(p, sid, MockProvider(p.book.images.max_pixels))
-    pl = margins.fitted(p)[sid]
-    after = Image.open(p.art_path(sid)).convert("RGB")
-    bx, by, bw, bh = pl["box"]
-    assert abs(after.width / after.height - bw / bh) < 0.01        # printed without any crop
-    # the untouched picture sits whole inside the live area, at its own pixels
-    lx, ly, lw, lh = pl["live"]
-    k = after.width / bw
-    left, top = round((lx - bx) * k), round((by + bh - ly - lh) * k)
-    assert before.width <= lw * k + 1 and before.height <= lh * k + 1
-    cx, cy = after.width // 2, after.height // 2
-    a = after.getpixel((cx, cy))
-    b = before.getpixel((cx - (after.width - before.width) // 2, cy - (after.height - before.height) // 2))
-    assert max(abs(x - y) for x, y in zip(a, b)) <= 3
-    assert left >= 0 and top >= 0
-    assert (p.build / "art-originals" / f"{sid}.png").exists()
     assert kdp.SAFE * 25.4 == pytest.approx(9.7)
 
+    before = p.art_path(sid).read_bytes()
+    d = margins.draft(p, sid)
+    pl = margins.placement(p, sid)
+    bx, by, bw, bh = pl["box"]
+    with Image.open(d) as im:                                    # the draft has the page's own shape
+        assert abs(im.width / im.height - bw / bh) < 0.01
+    orig = p.build / "art-originals" / f"{sid}.png"
+    assert orig.read_bytes() == before
+
+    generate.run(p, {sid}, bump={sid}, drafts={sid: d})          # a new picture, drawn from the draft
+    assert p.art_path(sid).read_bytes() != before
+    assert orig.exists()                                         # the next margin redraw starts from the first one
     build_interior(p)
-    assert not any(e.startswith(f"{sid}:") for e in check(p)["errors"])
-    generate.run(p, {sid}, bump={sid})                             # a Redo draws a new picture: the fit is gone
-    assert sid not in margins.fitted(p)
+    assert not any(e.startswith(f"{sid}:") for e in check(p)["errors"])   # the new picture's own review decides
+    assert "changed since" not in json.dumps(generate.run(p))    # a plain run does not ask to redraw it again
+    generate.run(p, {sid}, bump={sid})                           # a plain Redo drops the kept original
+    assert not orig.exists()
