@@ -116,7 +116,8 @@ class Sheet:
     theme: Theme
     page_no: int = 1
     mark_color: str | None = None  # color of [[learning words]] on typeset pages
-    records: dict = field(default_factory=lambda: {"images": [], "text": [], "blank": []})
+    records: dict = field(default_factory=lambda: {"images": [], "text": [], "blank": [], "book_pages": {}})
+    _here: set = field(default_factory=set)  # book.yaml pages drawn on the current PDF page
 
     def __post_init__(self):
         _LANGUAGE.set(self.theme.language)  # para_html sets text in this book's typography
@@ -125,11 +126,23 @@ class Sheet:
                                initialFontName=self.theme.body)
         self.c.setTitle(self.path.stem)
 
+    def mark(self, book_page: int | None) -> None:
+        """Note that page `book_page` of book.yaml is drawn on this PDF page (control maps fixes back with it)."""
+        if book_page:
+            self._here.add(book_page)
+
+    def _flush_marks(self) -> None:
+        if self._here:
+            self.records["book_pages"][str(self.page_no)] = sorted(self._here)
+        self._here = set()
+
     def new_page(self) -> None:
+        self._flush_marks()
         self.c.showPage()
         self.page_no += 1
 
     def save(self) -> None:
+        self._flush_marks()
         self.c.save()
 
     def fill(self, color: str, box: Box | None = None) -> None:

@@ -25,15 +25,14 @@ def sequence(project: Project) -> list[Draw]:
     if book.front_matter.dedication:
         pages.append(lambda s, i: fm.dedication_page(s, i, book))
 
-    def story(draw: Draw, on_art: bool) -> Draw:
-        """A story page, with its page number when the book prints them."""
-        if not book.page_numbers:
-            return draw
-
-        def numbered(s: Sheet, i: kdp.Interior) -> None:
+    def story(draw: Draw, on_art: bool, n: int) -> Draw:
+        """Page n of book.yaml, with its page number when the book prints them."""
+        def page(s: Sheet, i: kdp.Interior) -> None:
+            s.mark(n)
             draw(s, i)
-            s.folio(i, on_art=on_art)
-        return numbered
+            if book.page_numbers:
+                s.folio(i, on_art=on_art)
+        return page
 
     for n, p in enumerate(book.pages, 1):
         layout = picture_layout(book, n - 1)
@@ -43,21 +42,21 @@ def sequence(project: Project) -> list[Draw]:
         if book.lettered(p):  # the words are in the art: the page is the picture
             html = ""
             if layout != "spread":
-                pages.append(story(lambda s, i, src=src: _full_bleed(s, i, src, "", space), True))
+                pages.append(story(lambda s, i, src=src: _full_bleed(s, i, src, "", space), True, n))
                 continue
         elif layout == "text_only" and frame:
-            pages.append(story(lambda s, i, html=html: _framed_text(s, i, frame, html), True))
+            pages.append(story(lambda s, i, html=html: _framed_text(s, i, frame, html), True, n))
             continue
         if layout == "spread":
             if len(pages) % 2 == 0:          # next page would be a recto; spreads start on a verso
                 pages.append(lambda s, i: fm.blank_page(s, i, book))
-            pages.append(story(lambda s, i, src=src, html=html, space=space: _spread_half(s, i, src, html, space, 0), True))
-            pages.append(story(lambda s, i, src=src: _spread_half(s, i, src, "", space, 1), True))
+            pages.append(story(lambda s, i, src=src, html=html, space=space: _spread_half(s, i, src, html, space, 0), True, n))
+            pages.append(story(lambda s, i, src=src: _spread_half(s, i, src, "", space, 1), True, n))
         elif layout == "full_bleed":
-            pages.append(story(lambda s, i, src=src, html=html, space=space: _full_bleed(s, i, src, html, space), True))
+            pages.append(story(lambda s, i, src=src, html=html, space=space: _full_bleed(s, i, src, html, space), True, n))
         else:  # text on paper: keep the bottom of the safe area clear for the centered page number
             foot = FOLIO_SPACE if book.page_numbers else 0.0
-            pages.append(story(lambda s, i, f=_LAYOUTS[layout], src=src, html=html, foot=foot: f(s, i, src, html, foot), False))
+            pages.append(story(lambda s, i, f=_LAYOUTS[layout], src=src, html=html, foot=foot: f(s, i, src, html, foot), False, n))
 
     end_art = project.art_path("the-end") if book.images.text_in_art and book.characters else None
     closing = [lambda s, i: fm.the_end_page(s, i, book, end_art)]

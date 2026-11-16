@@ -25,10 +25,10 @@ def sequence(project: Project) -> list[Draw]:
     for n, p in enumerate(book.pages, 1):
         if p.panels:
             srcs = [project.art_path(f"p{n:03d}-{k}") for k in range(1, len(p.panels) + 1)]
-            pages.append(lambda s, i, p=p, srcs=srcs: _panel_page(s, i, p, srcs, book.page_numbers))
+            pages.append(lambda s, i, p=p, srcs=srcs, n=n: (s.mark(n), _panel_page(s, i, p, srcs, book.page_numbers)))
         else:
             src = project.art_path(f"p{n:03d}")
-            pages.append(lambda s, i, p=p, src=src: _splash(s, i, p, src, book.page_numbers))
+            pages.append(lambda s, i, p=p, src=src, n=n: (s.mark(n), _splash(s, i, p, src, book.page_numbers)))
     closing = [lambda s, i: fm.the_end_page(s, i, book)]
     if book.about_author:
         closing.append(lambda s, i: fm.about_page(s, i, book))

@@ -218,7 +218,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
     label = sheet.style(9, align=TA_CENTER, color=t.accent)
     label.spaceAfter = 8
 
-    state = {"frame": None, "chapter": book.title, "opening": False}
+    state = {"frame": None, "chapter": book.title, "opening": False, "n": None}  # n: the book.yaml page being drawn
     # text_in_art books: text pages are typeset inside a generated decorative frame
     frame_art = project.art_path("text-frame") if needs_text_frame(book) else None
 
@@ -263,6 +263,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 flowables = [Spacer(1, (h * inch - total) * 0.42)] + flowables
         while flowables:
             ensure_frame()
+            sheet.mark(state["n"])
             state["frame"].addFromList(flowables, sheet.c)
             if flowables:
                 end_page()
@@ -301,6 +302,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
             return False
         if p.chapter:
             state["chapter"] = split_chapter(p.chapter)[1]
+        sheet.mark(state["n"])
         if frame_art:
             sheet.image(frame_art, (0, 0, pw, ph))
             if art is None:
@@ -323,12 +325,14 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
 
     def activity(draw):
         end_page()
+        sheet.mark(state["n"])
         draw()
         if book.page_numbers:
             sheet.folio(interior, on_art=True)
         sheet.new_page()
 
     for n, p in enumerate(book.pages, 1):
+        state["n"] = n
         src = project.art_path(f"p{n:03d}")
         flow = []
         if p.kind == "maze" and p.maze:
@@ -363,6 +367,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
             end_page()
             if p.chapter:
                 state["chapter"] = split_chapter(p.chapter)[1]
+            sheet.mark(n)
             sheet.image(src, (0, 0, interior.page_w, interior.page_h))
             if book.page_numbers:
                 sheet.folio(interior, on_art=True)
@@ -372,6 +377,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
             end_page()
             if p.chapter:
                 state["chapter"] = split_chapter(p.chapter)[1]
+            sheet.mark(n)
             illustrated_page(sheet, interior, p, src)
             if book.page_numbers:
                 sheet.folio(interior, on_art=True)
@@ -405,6 +411,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 flow.append(Paragraph(text, style))
         pour(flow, centred=bool(frame_art) and book.structured)  # template pages each have their own page
     end_page()
+    state["n"] = None
     if book.images.text_in_art and book.characters and not book.structured:
         full_page(lambda s, i, b: fm.the_end_page(s, i, b, project.art_path("the-end")))
 

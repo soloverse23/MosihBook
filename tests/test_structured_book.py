@@ -188,3 +188,29 @@ def test_text_is_set_on_the_frames_empty_paper_never_on_its_drawing(tmp_path):
     assert not errors
     text_on_drawing(p, i, [{"page": 3, "box": [1.0, 5.5, 2.5, 1.5], "art": art.name}], errors)
     assert errors and "over the picture" in errors[0]
+
+
+@pytest.mark.parametrize("lettered", [True, False])
+def test_control_knows_the_words_of_exercise_and_solutions_pages(tmp_path, lettered):
+    """A wording fix on a game or the solutions page edits book.yaml, never redraws the vignette or frame."""
+    from bookforge import control
+    raw = yaml.safe_dump(structured_book(lettered), allow_unicode=True)
+    (tmp_path / "book.yaml").write_text(raw)
+    p = Project(tmp_path / "book.yaml", mock=True)
+    generate.run(p)
+    build_interior(p)
+    info = control.page_info(p)
+    kinds = {n: [p.book.pages[b - 1].kind for b in i["book_pages"]] for n, i in info.items()}
+    game = next(n for n, k in kinds.items() if "odd_one_out" in k)
+    sol = next(n for n, k in kinds.items() if "solutions" in k)
+    assert "odd_one_out group 1" in info[game]["text"] and "'pomme'" in info[game]["text"]
+    assert "answers from book.yaml page" in info[sol]["text"] and "'pomme'" in info[sol]["text"]
+    for n in (game, sol):
+        issue = control._normalise({"page": n, "problem": "typo", "current": "pomme", "replace_with": "poire",
+                                    "fix": "text", "prompt": "Write poire."}, info)
+        assert issue["fix"] == "text" and issue["slot"] is None
+        out = control._direct(raw, issue)  # item and answer both change; nothing else in the book does
+        group = yaml.safe_load(out)["pages"][info[game]["book_pages"][0] - 1]["odd_one_out"]["groups"][0]
+        assert group["answer"] == "poire" and "poire" in group["items"] and "pomme" not in out
+    # words that are also printed elsewhere are left to Claude, which is told where to look
+    assert control._direct(raw, {**issue, "current": "Nina", "replace_with": "Nora"}) is None

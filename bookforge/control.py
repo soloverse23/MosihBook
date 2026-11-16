@@ -15,6 +15,7 @@ import yaml
 from . import author
 from .plan import plan
 from .project import Project
+from .spec import Book, plain
 
 BATCH = 5          # pages shown to Claude per call
 PARALLEL = 3       # calls in flight at once
@@ -23,7 +24,9 @@ FIXES = ("image", "text", "layout")
 SYSTEM = """\
 You are the proofreader and print controller of a children's book that is about to be published.
 You are shown pages of the built PDF as pictures (named page-NNN.png, NNN = the PDF page number), with the
-manuscript text each page was made from when it is known. Find the real defects a careful editor would
+manuscript each page was made from when it is known: the page of book.yaml it comes from, its words, and for
+game and exercise pages the data the software typesets them from (fill_in items and their answers, matching
+pairs, odd_one_out groups). The solutions page prints the answers from the data of the game pages it names. Find the real defects a careful editor would
 fix before printing, and for each one say how to fix it.
 
 Look for:
@@ -50,8 +53,12 @@ Rules:
 - `prompt` is the fix, ready to send, written as an instruction and nothing else:
     for "image": what the redrawn picture must show or the exact words it must carry, and "keep everything
       else as it is";
-    for "text" and "layout": an instruction to the person who edits book.yaml (the page's `text`,
-      `text_position`, `layout`, `chapter` fields), naming the page and quoting the exact words.
+    for "text" and "layout": an instruction to the person who edits book.yaml, naming the book.yaml page and
+      the field that holds the words (`text`, `chapter`, `text_position`, `layout`, or a game's data such as
+      `fill_in` items, `matching` pairs, `odd_one_out` groups) and quoting the exact words. A wrong answer on
+      the solutions page is fixed in the game page whose data it comes from.
+  Words that are typeset (listed in the manuscript) are always "text" or "layout", never "image", even when
+  the page also carries a picture: a redraw would not change them.
 - `current` and `replace_with` are only for a wording fix: what is written now and what it must say.
 - `problem` is one plain sentence a parent could understand. `page` is the PDF page number.
 - Some pages list "Already ignored by the writer". The writer has seen those and decided to keep them as
@@ -83,20 +90,58 @@ def _slot_of(src: str) -> str:
     return Path(src).stem
 
 
+def _game_lines(pg) -> list[str]:
+    """The typeset words of a game page, as they are written in its data."""
+    if pg.fill_in:
+        return [f"  fill_in item {k}: {it.prompt!r} (answer: {it.answer!r})" for k, it in enumerate(pg.fill_in.items, 1)]
+    if pg.matching:
+        return [f"  matching pair {k}: {a!r} - {b!r}" for k, (a, b) in enumerate(pg.matching.pairs, 1)]
+    if pg.odd_one_out:
+        return [f"  odd_one_out group {k}: {g.items} (answer: {g.answer!r})" for k, g in enumerate(pg.odd_one_out.groups, 1)]
+    if pg.certificate:
+        c = pg.certificate
+        return [f"  certificate {k}: {v!r}" for k, v in (("title", c.title), ("name_label", c.name_label),
+                                                          ("date_label", c.date_label)) if v]
+    return []
+
+
+def manuscript(book: Book, n: int) -> str:
+    """What page n of book.yaml prints, named by its fields so a fix can say where the words live."""
+    pg = book.pages[n - 1]
+    out = [f"book.yaml page {n}" + (f" (kind: {pg.kind})" if pg.kind else "") + ":"]
+    if pg.chapter:
+        out.append(f"  chapter: {pg.chapter!r}")
+    if pg.text.strip():
+        out.append("  text: " + plain(pg.text).strip())
+    out += _game_lines(pg)
+    if pg.kind == "solutions":  # its answers are printed from the games' own data
+        for k, g in enumerate(book.pages, 1):
+            if g.drawn_activity and g.kind != "final_challenge":
+                out.append(f"  answers from book.yaml page {k} ({g.chapter or g.kind}):")
+                out += ["  " + x for x in _game_lines(g)]
+    return "\n".join(out)
+
+
 def page_info(project: Project) -> dict[int, dict]:
-    """For every PDF page: its proof image, the picture it carries (slot id) and the manuscript text when known."""
+    """For every PDF page: its proof image, the picture it carries (slot id), the book.yaml pages it shows and
+    their manuscript when known."""
     m = json.loads(project.manifest.read_text())
-    slots = {s.id: s for s in plan(project.book)}
+    book = project.book
+    slots = {s.id: s for s in plan(book)}
+    marks = m.get("book_pages")  # absent in books built before the layout recorded it
     info: dict[int, dict] = {}
     for n in range(1, m["pages"] + 1):
-        pic = next((i["src"] for i in m["images"] if i["page"] == n and _slot_of(i["src"]) in slots), None)
-        sid = _slot_of(pic) if pic else None
-        text, book_page = None, None
-        if sid and (mt := re.fullmatch(r"p(\d+)", sid)):
-            book_page = int(mt.group(1))
-            pg = project.book.pages[book_page - 1]
-            text = "\n".join(x for x in (pg.chapter, pg.text) if x)
-        info[n] = {"proof": project.proofs / f"page-{n:03d}.png", "slot": sid, "text": text, "book_page": book_page,
+        pics = [_slot_of(i["src"]) for i in m["images"] if i["page"] == n and _slot_of(i["src"]) in slots]
+        if marks is not None:
+            pages = [b for b in marks.get(str(n), []) if 1 <= b <= len(book.pages)]
+        else:
+            pages = [int(mt.group(1)) for sid in pics[:1] if (mt := re.fullmatch(r"p(\d+)", sid))]
+        # the page's own picture first; a shared frame or a maze end only when it has none
+        own = [sid for sid in pics if any(sid.startswith(f"p{b:03d}") for b in pages)]
+        sid = (own or pics or [None])[0]
+        text = "\n\n".join(manuscript(book, b) for b in pages) or None
+        info[n] = {"proof": project.proofs / f"page-{n:03d}.png", "slot": sid, "text": text,
+                   "book_page": pages[0] if len(pages) == 1 else None, "book_pages": pages,
                    "lettered": bool(sid and slots[sid].lettering)}
     return info
 
@@ -118,7 +163,7 @@ async def _check_batch(project: Project, pages: list[int], info: dict, language:
     lines = []
     for n in pages:
         t = info[n]["text"]
-        lines.append(f"page-{n:03d}.png: " + (f"manuscript text:\n{t}" if t else "text unknown (part of the picture)"))
+        lines.append(f"page-{n:03d}.png: " + (f"manuscript:\n{t}" if t else "text unknown (part of the picture)"))
         for i in ignored:
             if i["page"] == n:
                 lines.append(f"  Already ignored by the writer: {i['problem']}"
@@ -140,7 +185,7 @@ def _normalise(issue: dict, info: dict) -> dict:
     return {"page": issue["page"], "problem": issue["problem"].strip(), "current": (issue.get("current") or "").strip(),
             "replace_with": (issue.get("replace_with") or "").strip(), "fix": fix,
             "prompt": issue["prompt"].strip(), "slot": p.get("slot") if fix == "image" else None,
-            "book_page": p.get("book_page")}
+            "book_page": p.get("book_page"), "book_pages": p.get("book_pages") or []}
 
 
 async def inspect(project: Project) -> dict:
@@ -198,16 +243,69 @@ def view(project: Project) -> dict | None:
 def instruction(issue: dict, prompt: str) -> str:
     """What the editor of book.yaml is told. PDF page numbers differ from the pages of book.yaml (cover, front
     matter), so the page is named by its place in book.yaml and its words are quoted."""
-    bp = issue.get("book_page")
-    where = (f"On page {bp} of the `pages:` list in book.yaml (page {issue['page']} of the printed PDF)" if bp
-             else f"On page {issue['page']} of the printed PDF (find it by its words)")
+    bps = issue.get("book_pages") or ([issue["book_page"]] if issue.get("book_page") else [])
+    if len(bps) == 1:
+        where = f"On page {bps[0]} of the `pages:` list in book.yaml (page {issue['page']} of the printed PDF)"
+    elif bps:
+        where = (f"On page {issue['page']} of the printed PDF, which shows pages {', '.join(map(str, bps))} of the "
+                 "`pages:` list in book.yaml")
+    else:
+        where = f"On page {issue['page']} of the printed PDF (find it by its words)"
     quote = f' Wording to change: "{issue["current"]}" -> "{issue["replace_with"]}".' if issue.get("current") and issue.get("replace_with") else ""
-    return f"{where}: {prompt}{quote} Change only what this asks."
+    return (f"{where}: {prompt}{quote} The words may live in the page's `text`, `chapter` or in a game's data "
+            "(`fill_in` items and answers, `matching` pairs, `odd_one_out` groups; the solutions page prints the "
+            "answers from the game pages' data, so fix those there). Change only what this asks.")
+
+
+def _strings(node):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _strings(v)
+
+
+def _direct(current_yaml: str, issue: dict) -> str | None:
+    """A wording fix whose words appear in book.yaml only inside the pages that print them (for the solutions
+    page: also the games its answers come from) is made by replacing them there: no rewrite of the whole
+    file, nothing else can move."""
+    cur, new = issue.get("current") or "", issue.get("replace_with") or ""
+    targets = issue.get("book_pages") or []
+    if not cur.strip() or not new.strip() or cur == new or issue["fix"] != "text" or not targets:
+        return None
+    word = re.compile(rf"(?<!\w){re.escape(cur)}(?!\w)")
+    try:
+        before = yaml.safe_load(current_yaml)
+        pages = before.get("pages") or []
+        if any(not 1 <= b <= len(pages) for b in targets):
+            return None
+        allowed = set(targets)
+        if any((pages[b - 1] or {}).get("kind") == "solutions" for b in targets):
+            allowed |= {k for k, pg in enumerate(pages, 1) if spec_field(pg)}
+        inside = sum(len(word.findall(x)) for b in allowed for x in _strings(pages[b - 1]))
+        if not inside or len(word.findall(current_yaml)) != inside:
+            return None  # the words are missing, or also elsewhere in the book: let Claude find the right place
+        out = word.sub(lambda _: new, current_yaml)
+        after = yaml.safe_load(out)
+        Book.model_validate(after)
+    except Exception:
+        return None
+    return out if after != before else None
+
+
+def spec_field(pg) -> bool:
+    """Does this book.yaml page hold game data the solutions page prints?"""
+    return isinstance(pg, dict) and any(pg.get(f) for f in ("fill_in", "matching", "odd_one_out", "maze"))
 
 
 async def apply_text(current_yaml: str, issue: dict, prompt: str) -> str:
-    """Rewrite book.yaml for a text or layout fix. Raises if Claude changed nothing, so a fix is never
+    """Rewrite book.yaml for a text or layout fix. Raises if nothing changed, so a fix is never
     reported as done when the book is the same."""
+    if prompt == issue.get("prompt") and (out := _direct(current_yaml, issue)):
+        return out
     new = await author.revise(current_yaml, instruction(issue, prompt))
     if yaml.safe_load(new) == yaml.safe_load(current_yaml):
         raise author.AuthorError("Claude made no change to the book, so nothing was fixed. Edit the fix and try again.")

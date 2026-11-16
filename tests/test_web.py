@@ -400,11 +400,11 @@ def test_control_and_correction(client, monkeypatch):
     pr = Project(state.book_dir(slug) / "book.yaml")
     rep = control.load(pr)
     text_issue = rep["issues"][0]
-    text_issue.update(fix="text", slot=None, book_page=3, status="open")
+    text_issue.update(fix="text", slot=None, book_page=2, book_pages=[2], status="open")
     control.report_path(pr).write_text(json.dumps(rep))
     c = client.post(f"/api/books/{slug}/control/{text_issue['id']}/apply", json={"prompt": "Fix the spelling."})
     assert c.status_code == 502 and "no change" in c.json()["detail"]
-    assert "page 3 of the `pages:` list in book.yaml" in seen[0] and "page 6 of the printed PDF" in seen[0]
+    assert "page 2 of the `pages:` list in book.yaml" in seen[0] and "page 6 of the printed PDF" in seen[0]
     assert client.get(f"/api/books/{slug}/control").json()["report"]["issues"][0]["status"] == "open"
 
     # a real change is written to book.yaml, the issue is applied and the book is flagged for a rebuild
