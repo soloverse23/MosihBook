@@ -30,8 +30,11 @@ SCHEMA = {
                                        "missing punctuation); empty when it matches exactly or nothing was expected"},
         "text_legible": {"type": "boolean", "description": "the lettering is crisp and easy for a child to read; "
                                                            "true when no text was expected"},
-        "text_in_safe_area": {"type": "boolean", "description": "every letter sits at least ~6% inside each image "
-                                                                "edge; true when no text was expected"},
+        "text_in_safe_area": {"type": "boolean", "description": "every letter (and its glow or shadow) sits at least 10% "
+                                                                "of the image height inside the top and bottom edges "
+                                                                "and 8% of the width inside the left and right edges; "
+                                                                "false when any letter comes closer; true when no "
+                                                                "text was expected"},
         "character_issues": {"type": "array", "items": {"type": "string"}},
         "anatomy_issues": {"type": "array", "items": {"type": "string"}},
         "composition_issues": {"type": "array", "items": {"type": "string"}},

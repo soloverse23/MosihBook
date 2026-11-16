@@ -23,6 +23,7 @@ from ..project import Project
 from ..providers.base import get_provider
 from ..providers.openai_images import MAX_REFS, ModerationBlocked
 from . import prompting
+from ..imaging import margins
 from .review import get_reviewer
 
 console = Console()
@@ -32,6 +33,7 @@ char_slot_id = characters.char_id
 # a Redo steps the variation counter past every key an older run may have used (up to 3 attempts per image),
 # so the redone image is always a fresh one
 REDO_STEP = 3
+MARGIN_PROBLEM = "words too close to the page edge (inside the 9.7 mm margin) - use Fit inside the margin"
 
 
 def run(project: Project, only: set[str] | None = None, bump: set[str] = frozenset(),
@@ -137,12 +139,15 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
             best = reviewer.review(cached, prompt, refs, slot.expected_text)
             reviews.data[key] = {"slot": slot.id, "verdict": best}
         shutil.copyfile(cached, project.art_path(slot.id))
+        margins.forget(project, slot.id)
         if slot.kind == "character":
             characters.lock(project, by_name[slot.id], project.art_path(slot.id))
         reviews.data.setdefault("_chosen", {})[slot.id] = {"key": key, "attempts": 1, "prompt": prompt_id}
         # only misspelled or stray lettering is serious enough to flag
         if best and (problems := serious_problems(best, bool(slot.lettering))):
             failures[slot.id] = "use Redo with a note: " + "; ".join(problems)
+        elif best and slot.lettering and not best.get("text_in_safe_area", True):
+            failures[slot.id] = MARGIN_PROBLEM
         return "done"
 
     def tracked(slot: Slot, previous: Path | None = None) -> str:
@@ -195,7 +200,7 @@ def text_problems(verdict: dict, lettered: bool) -> list[str]:
     if not verdict.get("text_legible", True):
         out.append("lettering hard to read")
     if not verdict.get("text_in_safe_area", True):
-        out.append("lettering too close to the edge (may be trimmed)")
+        out.append("words too close to the page edge (inside the 9.7 mm margin)")
     return out
 
 

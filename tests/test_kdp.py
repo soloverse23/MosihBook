@@ -17,11 +17,11 @@ def test_safe_box_mirrors_gutter():
     i = kdp.Interior(6, 9, 200)  # 151-300 pages -> 0.5" gutter
     rx, _, rw, _ = i.safe_box(1)
     vx, _, vw, _ = i.safe_box(2)
-    assert rx == 0.5 and rw == 6 - 0.5 - 0.375
-    assert vx == kdp.BLEED + 0.375 and vw == rw
+    assert rx == 0.5 and rw == pytest.approx(6 - 0.5 - kdp.SAFE)
+    assert vx == kdp.BLEED + kdp.SAFE and vw == pytest.approx(rw)
 
 
-@pytest.mark.parametrize("pages,g", [(24, 0.375), (150, 0.375), (151, 0.5), (301, 0.625), (828, 0.875)])
+@pytest.mark.parametrize("pages,g", [(24, kdp.SAFE), (150, kdp.SAFE), (151, 0.5), (301, 0.625), (828, 0.875)])
 def test_gutter_steps(pages, g):
     assert kdp.gutter(pages) == g
 

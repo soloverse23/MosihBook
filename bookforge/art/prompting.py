@@ -23,7 +23,7 @@ CONSTRAINTS = [
 
 COMPOSITION = {
     "full_bleed": "Full-page illustration that bleeds off every edge (it will be printed edge to edge). "
-                  "Keep faces and key subjects at least 8% away from all edges, because the edges get trimmed.",
+                  "Keep faces and key subjects at least 10% away from all edges, because the edges get trimmed.",
     "split": "Illustration for the upper portion of a picture-book page, wider than tall. Center the "
              "subject; the bottom edge meets the text area, so keep the bottom 10% simple.",
     "spread": "Wide panoramic double-page spread. The exact vertical center line is the book's fold: "
@@ -117,7 +117,7 @@ def lettering_block(book: Book, l: Lettering) -> str:
          f"of the book. Place the words {where}, as part of the illustration's design, sitting on calm sky, "
          "ground, water or soft light in the scene, never in a box, panel, banner, speech bubble or sign. "
          "Crisp, evenly spaced letters with strong contrast against what is behind them; body cap height "
-         "about 3.5% of the image height. Keep every letter at least 8% inside each edge of the image."
+         "about 3.5% of the image height. Keep every letter at least 12% of the image height inside the top and bottom edges and 10% of the width inside the left and right edges: the page is trimmed, and words near an edge get cut."
          + (f" {l.note.strip()}" if l.note else "")])
 
 

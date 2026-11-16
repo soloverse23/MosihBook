@@ -19,7 +19,7 @@ from .spec import Book, plain
 
 BATCH = 5          # pages shown to Claude per call
 PARALLEL = 3       # calls in flight at once
-FIXES = ("image", "text", "layout")
+FIXES = ("image", "margin", "text", "layout")
 
 SYSTEM = """\
 You are the proofreader and print controller of a children's book that is about to be published.
@@ -47,9 +47,13 @@ Rules:
 - Never translate. Quote the text exactly as it is written, accents included.
 - `fix` says what repairs it:
     "image"  - the picture itself must be redrawn (wrong content, or words that are part of the picture);
+    "margin" - words or a face drawn into the picture are right but come too close to the page edge (within
+               about 1 cm of the edge, where the printer trims): the picture is kept as it is and fitted inside
+               the safe margin, no redraw. Use it whenever the only problem is closeness to the edge;
     "text"   - the words in the manuscript must change (spelling, wording);
     "layout" - the words are right but their place, size, alignment or line breaks are wrong.
-  When the manuscript text is not known for a page, its words are part of the picture: use "image".
+  When the manuscript text is not known for a page, its words are part of the picture: use "image" (or
+  "margin" when they are only too close to the edge).
 - `prompt` is the fix, ready to send, written as an instruction and nothing else:
     for "image": what the redrawn picture must show or the exact words it must carry, and "keep everything
       else as it is";
@@ -178,13 +182,15 @@ def _normalise(issue: dict, info: dict) -> dict:
     """Route the fix to something the studio can really do on that page."""
     p = info.get(issue["page"], {})
     fix = issue["fix"] if issue.get("fix") in FIXES else "layout"
-    if p.get("lettered") or (fix in ("text", "layout") and not p.get("text")):
+    if fix != "margin" and (p.get("lettered") or (fix in ("text", "layout") and not p.get("text"))):
         fix = "image"            # its words are drawn into the picture: only a redraw changes them
+    if fix == "margin" and not p.get("lettered"):
+        fix = "layout"           # typeset words: the layout keeps them inside the margin, not the picture
     if fix == "image" and not p.get("slot"):
         fix = "text"             # a typeset page has no picture of its own to redraw
     return {"page": issue["page"], "problem": issue["problem"].strip(), "current": (issue.get("current") or "").strip(),
             "replace_with": (issue.get("replace_with") or "").strip(), "fix": fix,
-            "prompt": issue["prompt"].strip(), "slot": p.get("slot") if fix == "image" else None,
+            "prompt": issue["prompt"].strip(), "slot": p.get("slot") if fix in ("image", "margin") else None,
             "book_page": p.get("book_page"), "book_pages": p.get("book_pages") or []}
 
 

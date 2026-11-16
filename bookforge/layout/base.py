@@ -170,7 +170,11 @@ class Sheet:
             self.c.clipPath(clip, stroke=0, fill=0)
         self.c.drawImage(str(path), x * inch, y * inch, w * inch, h * inch)
         self.c.restoreState()
-        self.records["images"].append({"page": self.page_no, "src": src.name, "native_dpi": round(dpi)})
+        # where the picture sits (inches from the page's bottom-left): the margin fit (imaging.margins) uses it
+        self.records["images"].append({"page": self.page_no, "src": src.name, "native_dpi": round(dpi),
+                                       "box": [round(v, 4) for v in box],
+                                       "fit": [round(fw, 4), round(fh, 4)] if fit_size else None,
+                                       "crop": list(crop) if crop else None})
 
     def style(self, size: float, font: str | None = None, align: int | None = None,
               color: str | None = None, leading: float = 1.38, **extra) -> ParagraphStyle:

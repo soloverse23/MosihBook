@@ -295,8 +295,10 @@ function jobPanel(title) {
 }
 
 const dur = (sec) => sec < 60 ? `${Math.max(1, Math.round(sec))}s` : sec < 3600 ? `${Math.round(sec / 60)} min` : `${(sec / 3600).toFixed(1)} h`;
+// a note or problem that is only about the page edge (the studio's languages)
+const MARGIN_MSG = /margin|marge|\brand\b|safe.?(area|zone)|bleed|trim|edge|too close|cut off|حاشیه|مارجین|لبه|کناره|بریده|برش/i;
 const JOB_LABELS = { mock: "Building preview", pilot: "Generating pilot", art: "Generating art",
-  regen: "Redrawing image", build: "Building print files" };
+  regen: "Redrawing image", build: "Building print files", margins: "Fitting pictures inside the margin" };
 
 // one tile in the live grid: a finished image, a failed one, or one being drawn right now
 function liveTile(slug, id, im) {
@@ -1661,16 +1663,20 @@ async function stepArt(host, b, slug) {
       const m = /^([\w-]+):\s*(.*)$/.exec(msg);
       const s = m && p.slots.find((x) => x.id === m[1]);
       if (!s) return { text: esc(msg), btn: "" };
-      const why = m[2].replace(/\s*-\s*redo it before uploading\.?$/i, "");
+      const why = m[2].replace(/\s*-\s*(redo it before uploading|fit it inside the margin( again)?)\.?$/i, "");
+      if (MARGIN_MSG.test(m[2])) return { text: `<b>${esc(slotName(s))}</b> · ${esc(why)}`, fit: s.id,
+        btn: `<button class="btn sm pf-redo" data-pffit="${esc(s.id)}" title="Keeps this picture: shrinks it inside the margin and paints only the border">${icon("sparkle")}Fit inside the margin</button>` };
       return { text: `<b>${esc(slotName(s))}</b> · ${esc(why)}`,
         btn: `<button class="btn sm pf-redo" data-pfredo="${esc(s.id)}" data-why="${esc(why)}">${icon("refresh")}Redo</button>` };
     };
+    const toFit = [...new Set([...r.errors, ...warns].map((e) => fix(e).fit).filter(Boolean))];
     const line = (cls, ic, msg, extra = "") => { const f = fix(msg); return `<li class="${cls}">${icon(ic)}<span>${f.text}</span>${f.btn}${extra}</li>`; };
     $("#pf").innerHTML = `<div class="card"><div class="card-h"><h3>Preflight</h3>${r.ok ? `<span class="badge ok">Passed</span>` : `<span class="badge err">Failed</span>`}</div>
       <div class="card-b"><ul class="checklist">
         ${r.errors.map((e) => line("e", "x", e)).join("")}
         ${warns.map((w) => line("w", "alert", w, ignoreBtn(slug, `pf|${w}`))).join("")}
         ${r.ok ? `<li class="o">${icon("check")}<span>${r.pages} pages · ${esc(r.trim)} · fonts embedded · bleed, margins and cover size match KDP</span></li>` : ""}</ul>
+        ${toFit.length > 1 ? `<div style="margin-top:8px"><button class="btn sm" id="pf-fit-all">${icon("sparkle")}Fit all ${toFit.length} inside the margin · ~${money(fitCost(toFit))}</button></div>` : ""}
         ${warns.length > 1 ? `<div style="margin-top:8px"><button class="btn sm ghost" id="pf-ignore-all">Ignore all</button></div>` : ""}
         ${[...r.errors, ...warns].some((e) => fix(e).btn) ? `<p class="faint xs" style="margin-top:8px">After redrawing, press Build again to check the new images.</p>` : ""}</div></div>`;
     $("#pf-ignore-all")?.addEventListener("click", () => {
@@ -1679,6 +1685,8 @@ async function stepArt(host, b, slug) {
       showPreflight(r);
     });
     $$("[data-pfredo]", $("#pf")).forEach((btn) => (btn.onclick = () => ctx.redo(btn.dataset.pfredo, btn, btn.dataset.why)));
+    $$("[data-pffit]", $("#pf")).forEach((btn) => (btn.onclick = () => ctx.fit([btn.dataset.pffit], btn)));
+    $("#pf-fit-all")?.addEventListener("click", (e) => ctx.fit(toFit, e.currentTarget));
   };
   const loadReview = async () => {
     const r = await api("GET", `/api/books/${slug}/review`).catch(() => ({ slots: [] }));
@@ -1694,13 +1702,13 @@ async function stepArt(host, b, slug) {
     await loadReview();
   };
 
-  const jobButtons = () => [...["#pilot", "#all", "#build", "#pp"].map((q) => $(q)).filter(Boolean), ...$$("[data-redo], [data-pfredo]")];
+  const jobButtons = () => [...["#pilot", "#all", "#build", "#pp", "#pf-fit-all"].map((q) => $(q)).filter(Boolean), ...$$("[data-redo], [data-pfredo], [data-pffit]")];
   const follow = async (job, kind, label, total) => {
     running = true; jobButtons().forEach((x) => (x.disabled = true));
     try {
       const j = await watchJob(job, label, total);
       if (j.status !== "done") toast("The job stopped. See the log.", true);
-      if (kind === "build" && j.status === "done") built = "real";
+      if ((kind === "build" || kind === "margins") && j.status === "done") built = "real";
       if (j.result?.preflight) preflight = j.result.preflight;
       // reload the plan so the new images show; retry once, since a failed reload would leave the old picture
       for (let i = 0; i < 3; i++) {
@@ -1719,6 +1727,14 @@ async function stepArt(host, b, slug) {
     return follow(job, kind, label, total);
   });
   const cost = (title, body) => modal({ title, body: `${body}<br><br>This uses the OpenAI image API and costs real money.`, confirm: "Generate" });
+  const fitCost = (ids) => ids.reduce((a, id) => a + (p.slots.find((s) => s.id === id)?.cost_usd || p.base_cost_usd), 0);
+  // keep the pictures and fit them inside the margin (one border painted per picture), then rebuild
+  ctx.fit = async (ids, btn, confirmed = false) => {
+    if (!confirmed && !(await modal({ title: ids.length > 1 ? `Fit ${ids.length} pictures inside the margin?` : `Fit ${slotName({ id: ids[0] })} inside the margin?`,
+      body: `Each picture is kept as it is, words included, and shrunk just enough to sit inside the 9.7 mm margin; the image model paints only the new border around it. About ${money(fitCost(ids))}, then the book is built again.<br><br>This uses the OpenAI image API and costs real money.`,
+      confirm: "Fit" }))) return;
+    run(btn, "margins", { slots: ids }, ids.length > 1 ? "Fitting pictures inside the margin…" : `Fitting ${slotName({ id: ids[0] })}…`, ids.length);
+  };
   ctx.redo = async (id, btn, prefill = "") => {
     const slot = p.slots.find((s) => s.id === id);
     const isHigh = slot?.quality === "high";
@@ -1726,8 +1742,10 @@ async function stepArt(host, b, slug) {
       body: `Draws this image once more with your correction: about ${money(isHigh ? p.high_cost_usd : p.base_cost_usd)}.`,
       fields: `<div class="field"><label for="m-note">What should change?</label>
         <textarea class="input" id="m-note" name="note" rows="3" required placeholder="Pip smaller, facing left, softer light. Spell 'wiggles' with two g's.">${esc(prefill)}</textarea></div>
-        <label class="check"><input type="checkbox" name="high" ${isHigh ? "checked" : ""}> High quality (~${money(p.high_cost_usd)} instead of ~${money(p.base_cost_usd)})</label>` });
+        <label class="check"><input type="checkbox" name="high" ${isHigh ? "checked" : ""}> High quality (~${money(p.high_cost_usd)} instead of ~${money(p.base_cost_usd)})</label>
+        <label class="check"><input type="checkbox" name="keep" ${MARGIN_MSG.test(prefill) ? "checked" : ""}> Only fit it inside the 9.7 mm margin: keep this picture and its words, paint just the border</label>` });
     if (!v) return;
+    if (v.keep) return ctx.fit([id], btn, true);
     if (!!v.high !== isHigh) p = ctx.p = await api("PUT", `/api/books/${slug}/high`, { slots: [id], on: !!v.high });
     run(btn, "regen", { slots: [id], note: (v.note || "").trim() || null }, `Redrawing ${slotName({ id })}…`, 1);
   };
@@ -1735,13 +1753,14 @@ async function stepArt(host, b, slug) {
   await Promise.all([loadReview(), built === "real" ? loadPreflight() : null]);
   if (!host.isConnected) return;
   // a job still running on the server (e.g. after a page refresh) opens the step it belongs to
-  tab = { pilot: "art", art: "art", regen: "art", build: "build" }[b.job_kind] || auto();
+  tab = { pilot: "art", art: "art", regen: "art", build: "build", margins: "build" }[b.job_kind] || auto();
   drawSteps(); drawPanel();
   if (b.job) follow(b.job, b.job_kind, `${JOB_LABELS[b.job_kind] || "Working"}…`, 0);
 }
 
 // ---------- control & correction: Claude proofreads the built book, page by page ----------
-const FIX_LABEL = { image: "Redraw the picture", text: "Fix the words", layout: "Fix the page layout" };
+const FIX_LABEL = { image: "Redraw the picture", margin: "Fit inside the margin", text: "Fix the words", layout: "Fix the page layout" };
+const PAID_FIX = new Set(["image", "margin"]);
 
 async function stepControl(host, b, slug) {
   const head = stepHead("Control & correction", "Claude reads every page of the built book, lists the real problems and writes the fix for each one.");
@@ -1771,10 +1790,10 @@ async function stepControl(host, b, slug) {
     else if (s === "queued") body = `<div class="ctl-state">Waiting in the queue <button class="btn sm ghost" data-unq="${i.id}">Remove</button></div>`;
     else body = `<label class="ctl-pick" ${report.issues.filter((x) => x.page === i.page && x.status !== "ignored").length > 1 ? "" : "hidden"}><input type="checkbox" data-pick="${i.id}" checked> Include in “Apply selected”</label>
       <textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
-      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}">${icon(i.fix === "image" ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
+      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}">${icon(PAID_FIX.has(i.fix) ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
         <button class="btn sm ghost" data-skip="${i.id}" ${phase === "check" ? "disabled" : ""}>Ignore</button></div>`;
     return `<div class="ctl-issue ${i.status} ${s ? "is-" + s : ""}" id="iss-${i.id}">
-      <div class="row gap2"><span class="badge ${i.fix === "image" ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span></div>
+      <div class="row gap2"><span class="badge ${PAID_FIX.has(i.fix) ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span></div>
       <p class="ctl-problem">${esc(i.problem)}</p>
       ${i.replace_with ? `<p class="ctl-swap">${i.current ? `<s>${esc(i.current)}</s> → ` : ""}<b>${esc(i.replace_with)}</b></p>` : ""}${body}</div>`;
   }
@@ -1863,7 +1882,7 @@ async function stepControl(host, b, slug) {
   async function applyOne(it) {
     const i = report.issues.find((x) => x.id === it.id);
     const r = await api("POST", `/api/books/${slug}/control/${it.id}/apply`, { prompt: it.prompt });
-    if (r.job) await watchJob(r.job, `Redrawing ${i.slot}…`, 1);
+    if (r.job) await watchJob(r.job, `${i.fix === "margin" ? "Fitting" : "Redrawing"} ${i.slot}…`, 1);
   }
 
   let pumping = false;
@@ -1914,8 +1933,13 @@ async function stepControl(host, b, slug) {
     }
     if (lost) toast(`${lost} queued fix${lost > 1 ? "es were" : " was"} dropped: the new check no longer shows ${lost > 1 ? "them" : "it"}.`);
   }
-  const imageCost = (list) => list.reduce((a, i) => a + (i.fix === "image" ? i.cost_usd || 0 : 0), 0);
-  const redrawNote = (list) => `${list.filter((i) => i.fix === "image").length} picture${list.filter((i) => i.fix === "image").length > 1 ? "s" : ""} will be redrawn: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
+  const imageCost = (list) => list.reduce((a, i) => a + (PAID_FIX.has(i.fix) ? i.cost_usd || 0 : 0), 0);
+  const redrawNote = (list) => {
+    const n = (f) => list.filter((i) => i.fix === f).length, pl = (k) => (k > 1 ? "s" : "");
+    const parts = [n("image") ? `${n("image")} picture${pl(n("image"))} will be redrawn` : "",
+      n("margin") ? `${n("margin")} picture${pl(n("margin"))} will be kept and fitted inside the 9.7 mm margin (only the border is painted)` : ""].filter(Boolean);
+    return `${parts.join("; ")}: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
+  };
 
   host.addEventListener("change", (e) => { const c = e.target.closest("[data-pick]"); if (c) refreshPage(c.closest(".ctl-card")); });
   host.addEventListener("click", async (e) => {
@@ -1944,14 +1968,14 @@ async function stepControl(host, b, slug) {
     if (t.dataset.unq) { queue.splice(queue.findIndex((q) => q.id === t.dataset.unq), 1); refreshIssue(t.dataset.unq); return drawHead(); }
     if (t.dataset.apply) {
       const i = report.issues.find((x) => x.id === t.dataset.apply);
-      if (i.fix === "image" && !(await modal({ title: "Redraw this picture?", body: redrawNote([i]), confirm: "Redraw" }))) return;
+      if (PAID_FIX.has(i.fix) && !(await modal({ title: i.fix === "margin" ? "Fit this picture inside the margin?" : "Redraw this picture?", body: redrawNote([i]), confirm: i.fix === "margin" ? "Fit" : "Redraw" }))) return;
       return enqueue(i.id);
     }
     if (t.dataset.pageapply) {
       const card = t.closest(".ctl-card");
       const list = $$("[data-pick]", card).filter((c) => c.checked).map((c) => report.issues.find((x) => x.id === c.dataset.pick));
       if (!list.length) return;
-      if (list.some((i) => i.fix === "image") && !(await modal({ title: `Apply ${list.length} fixes on page ${t.dataset.pageapply}?`, body: redrawNote(list), confirm: "Apply" }))) return;
+      if (list.some((i) => PAID_FIX.has(i.fix)) && !(await modal({ title: `Apply ${list.length} fixes on page ${t.dataset.pageapply}?`, body: redrawNote(list), confirm: "Apply" }))) return;
       return list.forEach((i) => enqueue(i.id));
     }
     if (t.id === "ignore-all") {
@@ -1965,7 +1989,7 @@ async function stepControl(host, b, slug) {
     }
     if (t.id === "apply-all") {
       const list = todoList();
-      const body = list.some((i) => i.fix === "image") ? redrawNote(list) : "The words and layout will be fixed.";
+      const body = list.some((i) => PAID_FIX.has(i.fix)) ? redrawNote(list) : "The words and layout will be fixed.";
       if (!(await modal({ title: `Apply all ${list.length} fixes?`, body: `${body}<br><br>They run one after another, then the book is rebuilt. Press “Check again” when you want the pages read again.`, confirm: "Apply all" }))) return;
       list.forEach((i) => enqueue(i.id));
     }

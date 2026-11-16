@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import author, characters, control, exports, kdp, settings, spec, templates
 from ..art.lint import lint
 from ..art.generate import review_notes, serious_problems
+from ..imaging import margins
 from ..plan import plan
 from ..spec import QUALITY_COST_USD
 from ..project import Project
@@ -580,6 +581,18 @@ async def control_apply(slug: str, issue_id: str, body: dict = Body(default={}))
     prompt = (body.get("prompt") or issue["prompt"]).strip()
     if not prompt:
         raise HTTPException(400, "write the fix first")
+    # a redraw asked only to keep things inside the margin keeps the picture and fits it there instead
+    if issue["fix"] == "image" and margins.is_margin_request(prompt) and not issue.get("replace_with"):
+        issue["fix"] = "margin"
+    if issue["fix"] == "margin":
+        if not settings.load().openai_api_key:
+            raise HTTPException(400, "add your OpenAI API key in Settings first")
+        try:
+            job = jobs.start(slug, "margins", slots=[issue["slot"]])
+        except (ValueError, RuntimeError) as e:
+            raise HTTPException(409, str(e))
+        control.set_status(p, issue_id, "applied", prompt)
+        return {"job": job.id, "slot": issue["slot"]}
     if issue["fix"] == "image":
         if not settings.load().openai_api_key:
             raise HTTPException(400, "add your OpenAI API key in Settings first")

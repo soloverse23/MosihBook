@@ -54,20 +54,40 @@ class OpenAIProvider:
     def generate(self, prompt: str, size: tuple[int, int], refs: list[Path], quality: str | None = None) -> bytes:
         size_str = f"{size[0]}x{size[1]}"
         quality = quality or self.quality
+
+        def call():
+            if refs:
+                with ExitStack() as stack:
+                    files = [stack.enter_context(open(r, "rb")) for r in refs[:MAX_REFS]]
+                    return self.client.images.edit(model=self.model, image=files, prompt=prompt,
+                                                   size=size_str, quality=quality)
+            return self.client.images.generate(model=self.model, prompt=prompt, size=size_str, quality=quality)
+        return self._retry(call)
+
+    def extend(self, image: bytes, mask: bytes, prompt: str, size: tuple[int, int],
+               quality: str | None = None) -> bytes:
+        """Paint the transparent part of `mask` (PNG, alpha 0 = paint here) over `image`: an outpaint."""
+        size_str = f"{size[0]}x{size[1]}"
+        quality = quality or self.quality
+        try:
+            return self._retry(lambda: self.client.images.edit(
+                model=self.model, image=("page.png", image, "image/png"), mask=("mask.png", mask, "image/png"),
+                prompt=prompt, size=size_str, quality=quality))
+        except ModerationBlocked:
+            raise
+        except Exception as e:
+            if "mask" not in str(e).lower():
+                raise
+            # a model that takes no mask still sees the picture with its plain border to paint; the caller
+            # pastes the original back over the middle either way
+            return self._retry(lambda: self.client.images.edit(
+                model=self.model, image=("page.png", image, "image/png"), prompt=prompt,
+                size=size_str, quality=quality))
+
+    def _retry(self, call) -> bytes:
         for attempt in range(5):
             try:
-                if refs:
-                    with ExitStack() as stack:
-                        files = [stack.enter_context(open(r, "rb")) for r in refs[:MAX_REFS]]
-                        resp = self.client.images.edit(
-                            model=self.model, image=files, prompt=prompt,
-                            size=size_str, quality=quality,
-                        )
-                else:
-                    resp = self.client.images.generate(
-                        model=self.model, prompt=prompt, size=size_str, quality=quality,
-                    )
-                return base64.b64decode(resp.data[0].b64_json)
+                return base64.b64decode(call().data[0].b64_json)
             except Exception as e:
                 if "moderation_blocked" in str(e):
                     raise ModerationBlocked(str(e)) from e

@@ -7,7 +7,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 BLEED = 0.125
-SAFE = 0.375          # min margin from trim on outside/top/bottom for bleed books
+# min margin from trim on outside/top/bottom for bleed books. KDP asks for 0.375 in (9.53 mm); we keep 9.7 mm
+# so nothing that matters (words, page numbers, lettering drawn into a picture) lands near the cut
+SAFE = 9.7 / 25.4
 MIN_PAGES = 24
 MAX_PAGES = 828
 SPINE_TEXT_MIN_PAGES = 80   # KDP: spine text only for books with more than 79 pages
@@ -15,6 +17,7 @@ SPINE_TEXT_MARGIN = 0.0625  # keep spine text this far from each fold
 BARCODE_W, BARCODE_H = 2.0, 1.2
 BARCODE_INSET = 0.25        # barcode box sits this far from back-cover trim (bottom/right)
 MIN_DPI = 300
+ART_PAD = 0.03            # extra clearance for drawn lettering: a model's letters have soft, glowing edges
 
 # inches of spine per page
 SPINE_FACTOR = {
@@ -25,7 +28,7 @@ SPINE_FACTOR = {
 }
 
 # (max page count, gutter/inside margin)
-GUTTER_STEPS = [(150, 0.375), (300, 0.5), (500, 0.625), (700, 0.75), (828, 0.875)]
+GUTTER_STEPS = [(150, SAFE), (300, 0.5), (500, 0.625), (700, 0.75), (828, 0.875)]
 
 TRIMS = {"5x8", "5.5x8.5", "6x9", "6.14x9.21", "7x10", "8x10", "8.25x8.25", "8.5x8.5", "8.5x11", "8.25x11", "8.27x11.69"}
 
@@ -87,6 +90,14 @@ class Interior:
         x = tx + left
         y = BLEED + SAFE
         return x, y, self.trim_w - left - right, self.trim_h - 2 * SAFE
+
+    def art_live_box(self) -> tuple[float, float, float, float]:
+        """(x, y, w, h) of the area every letter drawn INTO a page picture must stay in, whichever side of the
+        book the page lands on (a page can change sides when pages are added): the outer margin with its bleed
+        and the gutter, whichever is wider, on both sides, plus ART_PAD."""
+        side = max(BLEED + SAFE, self.gutter) + ART_PAD
+        y = BLEED + SAFE + ART_PAD
+        return side, y, self.page_w - 2 * side, self.page_h - 2 * y
 
     @property
     def spread_w(self) -> float:

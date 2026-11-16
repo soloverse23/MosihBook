@@ -13,13 +13,16 @@ from rich.text import Text
 from .. import settings
 from ..art import generate
 from ..art.lint import lint
+from ..imaging import margins
 from ..layout.cover import build_cover
 from ..layout.render import build_interior
 from ..preflight import check, proofs
+from ..providers.base import get_provider
+from ..providers.openai_images import ModerationBlocked
 from ..project import Project
 from . import state
 
-KINDS = ("mock", "pilot", "art", "regen", "build")
+KINDS = ("mock", "pilot", "art", "regen", "build", "margins")
 
 
 @dataclass
@@ -94,6 +97,31 @@ def start(slug: str, kind: str, slots: list[str] | None = None, note: str | None
     return job
 
 
+def _fit_margins(job: Job, p: Project, slots: list[str]) -> None:
+    """Fit the chosen pictures inside the margin, keeping each picture (imaging.margins). The book is laid out
+    first when the last build does not say where its pictures sit (books built before this existed)."""
+    if not slots:
+        raise RuntimeError("choose the pictures to fit")
+    if any(margins.placement(p, s) is None for s in slots):
+        job.log("laying out the book to measure where each picture sits…")
+        build_interior(p)
+    provider = get_provider(p.book.images)
+    job.on_progress("total", "", len(slots))
+    job.on_progress("phase", "Fitting inside the margin", len(slots))
+    for sid in slots:
+        job.on_progress("start", sid, None)
+        try:
+            result = margins.fit(p, sid, provider, job.log)
+        except ModerationBlocked:
+            result = "FAILED: blocked by OpenAI moderation"
+        except Exception as e:
+            result = f"FAILED: {e}"
+        if p.art_path(sid).exists():
+            generate.make_thumb(p, sid)
+        job.log(f"  {sid}: {result}")
+        job.on_progress("done", sid, result)
+
+
 def _run(job: Job, slots, note, pilot_pages, force) -> None:
     try:
         if job.user is None:
@@ -115,7 +143,9 @@ def _run(job: Job, slots, note, pilot_pages, force) -> None:
             for sid, why in (failures or {}).items():
                 job.log(f"NEEDS ATTENTION {sid}: {why}")
             job.result["failures"] = failures or {}
-        if job.kind in ("mock", "build"):
+        if job.kind == "margins":
+            _fit_margins(job, p, slots or [])
+        if job.kind in ("mock", "build", "margins"):
             m = build_interior(p)
             job.log(f"interior: {m['pages']} pages")
             c = build_cover(p)

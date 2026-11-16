@@ -33,6 +33,14 @@ class MockProvider:
     def request_size(self, aspect: float) -> tuple[int, int]:
         return flex_size(aspect, self.max_pixels)  # same sizing rules as gpt-image-2
 
+    def extend(self, image: bytes, mask: bytes, prompt: str, size: tuple[int, int],
+               quality: str | None = None) -> bytes:
+        """Free stand-in for an outpaint: the page as it was handed in (its border already prefilled)."""
+        with Image.open(io.BytesIO(image)) as im:
+            buf = io.BytesIO()
+            im.convert("RGB").resize(size, Image.LANCZOS).save(buf, "PNG")
+        return buf.getvalue()
+
     def generate(self, prompt: str, size: tuple[int, int], refs: list[Path], quality: str | None = None) -> bytes:
         rnd = random.Random(hashlib.sha256(prompt.encode()).digest())
         w, h = WORK_W, max(1, round(WORK_W * size[1] / size[0]))
