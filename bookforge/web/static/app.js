@@ -1754,7 +1754,9 @@ async function stepControl(host, b, slug) {
   // book is rebuilt and read again, because the check reads the built pages.
   const queue = [];                 // [{ id, prompt }]
   let working = null, phase = null; // phase: null | "fix" | "build" | "check"
-  host.innerHTML = head + `<div class="stack"><div class="ctl-sticky">${jobPanel("Working…")}<div id="ctl-head"></div></div><div class="stack" id="ctl"></div></div>`;
+  let ver = 0;                      // bumped after each rebuild so the page pictures load fresh
+  // only the slim bar of actions stays pinned; the job's progress and log scroll away with the page
+  host.innerHTML = head + `<div class="stack">${jobPanel("Working…")}<div class="ctl-sticky"><div id="ctl-head"></div></div><div class="stack" id="ctl"></div></div>`;
   const png = (n) => `/api/books/${slug}/build/proofs/page-${String(n).padStart(3, "0")}.png`;
   const stat = (id) => (working === id ? "working" : queue.some((q) => q.id === id) ? "queued" : null);
   const reload = async () => { report = (await api("GET", `/api/books/${slug}/control`)).report; };
@@ -1832,7 +1834,7 @@ async function stepControl(host, b, slug) {
     drawHead();
     const pages = [...new Set(report.issues.filter((i) => i.status !== "ignored").map((i) => i.page))];
     box.innerHTML = pages.map((n) => `<div class="card ctl-card"><div class="card-b ctl-page">
-      <a class="ctl-img" href="${png(n)}" target="_blank" rel="noopener"><img src="${png(n)}?${Math.round(report.checked)}" alt="Page ${n}" loading="lazy"><span class="ctl-load"><span class="spin"></span></span></a>
+      <a class="ctl-img" href="${png(n)}" target="_blank" rel="noopener"><img src="${png(n)}?${Math.round(report.checked)}-${ver}" alt="Page ${n}" loading="lazy"><span class="ctl-load"><span class="spin"></span></span></a>
       <div class="stack"><div class="row between"><h3>Page ${n}</h3><button class="btn sm primary" data-pageapply="${n}" hidden></button></div>${report.issues.filter((i) => i.page === n && i.status !== "ignored").map(issueHtml).join("")}</div></div></div>`).join("");
     voiceify(box);
     refreshAll();
@@ -1880,14 +1882,13 @@ async function stepControl(host, b, slug) {
           if (live()) { refreshIssue(it.id); drawHead(); }
         }
         if (!did || !live()) break;
-        // the queue is done: build the book again, then read it again. Fixes asked for meanwhile wait in the queue.
+        // the queue is done: build the book again so the pages show the fixes. It is not read again by itself:
+        // "Check again" does that when the user asks. Fixes asked for meanwhile wait in the queue.
         phase = "build"; drawHead(); refreshAll();
         const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
         await watchJob(job, "Building print files…", 0);
-        phase = "check"; drawHead();
-        report = (await api("POST", `/api/books/${slug}/control/check`)).report;
-        remap();
-        phase = null; draw();
+        ver++;
+        phase = null; await reload(); if (live()) draw();
         if (!queue.length) break;
       }
     } catch (e) {
@@ -1924,7 +1925,7 @@ async function stepControl(host, b, slug) {
     if (t.id === "rebuild") {
       if (pumping) return;
       pumping = true; phase = "build"; drawHead();
-      try { const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {}); await watchJob(job, "Building print files…", 0); }
+      try { const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {}); await watchJob(job, "Building print files…", 0); ver++; }
       catch (err) { toast(err.message, true); }
       finally { pumping = false; phase = null; await reload(); draw(); }
       return;
@@ -1965,7 +1966,7 @@ async function stepControl(host, b, slug) {
     if (t.id === "apply-all") {
       const list = todoList();
       const body = list.some((i) => i.fix === "image") ? redrawNote(list) : "The words and layout will be fixed.";
-      if (!(await modal({ title: `Apply all ${list.length} fixes?`, body: `${body}<br><br>They run one after another, then the book is rebuilt and checked again.`, confirm: "Apply all" }))) return;
+      if (!(await modal({ title: `Apply all ${list.length} fixes?`, body: `${body}<br><br>They run one after another, then the book is rebuilt. Press “Check again” when you want the pages read again.`, confirm: "Apply all" }))) return;
       list.forEach((i) => enqueue(i.id));
     }
   });
