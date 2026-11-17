@@ -116,12 +116,13 @@ def check(project: Project) -> dict:
     for a, b in zip(blanks, blanks[1:]):
         run = run + 1 if b == a + 1 else 1
         if run > 2 and b != n:  # KDP flags long runs of blank pages inside the book
-            warnings.append(f"more than 2 consecutive blank pages ending at page {b}")
+            warnings.append(f"pages {b - run + 1}-{b} are all blank ({run} in a row): KDP can flag a book with "
+                            "long blank stretches - add content to a page there, or ignore this if it is intended")
             break
     lettering_problems(project, errors, warnings)
     lettering_margins(project, errors)
     if m.get("mock_art"):
-        warnings.append("built with MOCK placeholder art - rebuild without --mock before uploading")
+        warnings.append("this build uses placeholder pictures, not the real art - build again with the real art before uploading")
 
     cover = None
     if project.cover_pdf.exists():
@@ -143,7 +144,7 @@ def check(project: Project) -> dict:
         cover = {"size_in": [round(cov.width, 4), round(cov.height, 4)], "spine_in": round(cov.spine, 4),
                  "spine_text": cov.spine_text_allowed}
     else:
-        errors.append("cover.pdf not built")
+        errors.append("the cover file has not been built yet - build the book again")
 
     report = {"ok": not errors, "pages": n, "trim": project.book.trim,
               "interior_page_in": [interior.page_w, interior.page_h], "gutter_in": interior.gutter,

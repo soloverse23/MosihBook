@@ -210,11 +210,34 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
     return failures
 
 
+_MARKS = set("\"'“”„‟‘’‚‛«»‹›`´ .,;:!?-–—…()[]")
+
+
+def clear_error(e: str) -> str | None:
+    """One lettering fault of the art review as a sentence a person can act on. The reviewer sometimes names
+    only the word or mark ("“", "Duckworth’s"): it is then said as what it is. A bare quotation mark that
+    cannot be located is dropped, since nobody could find or fix it."""
+    e = " ".join(str(e).split())
+    if not e or all(c in _MARKS for c in e) or e[0] in "\"“”„‘’'" and " " in e[:3]:
+        return None  # a bare mark, or "“ (opening quote before…) - should be \"": straight/curly quote noise
+    if len(e.split()) <= 2:  # just the word the reviewer pointed at
+        return f"the word “{e.strip(chr(34) + '“”')}” is not drawn exactly as written (misspelled, missing or changed)"
+    return e[0].lower() + e[1:] if e[:2] != e[:2].upper() else e
+
+
+def lettering_errors(verdict: dict) -> list[str]:
+    out = []
+    for e in verdict.get("text_errors", []):
+        if (c := clear_error(e)) and c not in out:
+            out.append(c)
+    return out
+
+
 def text_problems(verdict: dict, lettered: bool) -> list[str]:
     """The lettering faults of a verdict, worded for the person fixing the page."""
     if not lettered:
         return ["has text"] if verdict.get("has_text") else []
-    out = [f"text: {e}" for e in verdict.get("text_errors", [])]
+    out = [f"lettering mistake: {e}" for e in lettering_errors(verdict)]
     if not verdict.get("text_legible", True):
         out.append("lettering hard to read")
     if not verdict.get("text_in_safe_area", True):
@@ -226,8 +249,8 @@ def serious_problems(verdict: dict, lettered: bool) -> list[str]:
     """The faults that really ruin a page: misspelled lettering, or writing in art meant to have none.
     Everything else the reviewer says (margins, outfits, style) is only a note."""
     if not lettered:
-        return ["has text"] if verdict.get("has_text") else []
-    return [f"text: {e}" for e in verdict.get("text_errors", [])]
+        return ["text drawn in a picture that should have none"] if verdict.get("has_text") else []
+    return [f"lettering mistake: {e}" for e in lettering_errors(verdict)]
 
 
 def review_notes(verdict: dict, lettered: bool) -> list[str]:

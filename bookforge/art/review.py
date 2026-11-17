@@ -26,9 +26,13 @@ SCHEMA = {
         "score": {"type": "integer", "description": "1-10 overall fitness for a professionally printed book"},
         "has_text": {"type": "boolean", "description": "any visible letters, numbers, words or watermark"},
         "text_errors": {"type": "array", "items": {"type": "string"},
-                        "description": "lettered images only: every difference from the EXPECTED TEXT, one per "
-                                       "item, quoting the word (misspelled, missing, extra, garbled, wrong order, "
-                                       "missing punctuation); empty when it matches exactly or nothing was expected"},
+                        "description": "lettered images only: every real difference from the EXPECTED TEXT, one per "
+                                       "item, each a complete plain sentence that says what the words should be "
+                                       "and what the picture shows, e.g. 'the second line should read \"Duckworth's "
+                                       "nest\" but the picture shows \"Duckworths nest\"'. Never just a word or a "
+                                       "punctuation mark. A quotation mark or apostrophe drawn straight instead of "
+                                       "curly (or the reverse) is NOT a difference. Empty when it matches or "
+                                       "nothing was expected"},
         "text_legible": {"type": "boolean", "description": "the lettering is crisp and easy for a child to read; "
                                                            "true when no text was expected"},
         "text_in_safe_area": {"type": "boolean", "description": "every letter (and its glow or shadow) sits inside the "
