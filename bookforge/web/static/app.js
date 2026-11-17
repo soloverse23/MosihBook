@@ -2027,15 +2027,15 @@ async function stepTextcheck(host, b, slug) {
   }
   const check = () => run("check", async () => {
     report = (await api("POST", `/api/books/${slug}/textcheck/check`)).report;
+    pages = (await api("GET", `/api/books/${slug}`)).pages_view;   // the words shown are the file's words now
     toast(open().length ? "The list of mistakes is below." : "No mistakes found.");
   });
   const apply = (ids) => run("apply", async () => {
     const items = ids.map((id) => ({ id, prompt: ($(`[data-prompt="${id}"]`, host)?.value || "").trim() }));
     const r = await api("POST", `/api/books/${slug}/textcheck/apply`, { items });
     report = r.report;
+    pages = (await api("GET", `/api/books/${slug}`)).pages_view;   // always re-read: what you see is what is saved
     if (r.applied.length) {
-      const fresh = await api("GET", `/api/books/${slug}`);
-      pages = fresh.pages_view;
       toast(`${r.applied.length === 1 ? "Fix made" : `${r.applied.length} fixes made`} · ${changedText(r.changed).replace(/^Changed /, "changed ")}`);
     }
     if (r.error) toast(r.error, true);

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from . import author
+from . import author, proofing
 from .plan import plan
 from .project import Project
 from .spec import Book, plain
@@ -32,8 +32,8 @@ pairs, odd_one_out groups). The solutions page prints the answers from the data 
 fix before printing, and for each one say how to fix it.
 
 Look for:
-- spelling, accents and typography in the book's own language (e.g. French: tête not téte, reconnaître,
-  curly apostrophes ’, the superscript in 1er, 3 dots not 4, a non-breaking space so a number stays with its word);
+- every error of spelling, conjugation, agreement, grammar, punctuation and typography in the book's own
+  language, following the language checklist given with the pages;
 - words cut off, too close to the page edge, covered by a character or a drawing, or hard to read;
 - a line breaking badly (a number or dash alone at the end of a line), text in uneven alignment or size;
 - the picture contradicting the words (an object, a number, a mood, a character that is not where the text says);
@@ -41,8 +41,8 @@ Look for:
 - printer notes left on a page (e.g. "back cover"), a wrong title, a character drawn in two different looks.
 
 Rules:
-- Report only real defects: something a reader, a parent or the printer would clearly notice and be
-  bothered by. You are not required to find anything: a clean page has no entry, and an empty list for the
+- Every language error is a real defect and is reported, however small. Beyond language, report only real
+  defects: something a reader, a parent or the printer would clearly notice and be bothered by. You are not required to find anything: a clean page has no entry, and an empty list for the
   whole book is a good, normal answer. When unsure that something is a defect, leave it out. Never nitpick,
   never invent a problem to look useful, do not score, give no opinions on style, list no small
   preferences. One real defect is one entry: do not split it into several.
@@ -175,7 +175,8 @@ async def _check_batch(project: Project, pages: list[int], info: dict, language:
             if i["page"] == n:
                 lines.append(f"  Already ignored by the writer: {i['problem']}"
                              + (f" (\"{i['current']}\")" if i.get("current") else ""))
-    prompt = (f"The book is written in {language}. Check these pages.\n\n" + "\n\n".join(lines)
+    prompt = (f"The book is written in {language}.\n\nLanguage checklist:\n{proofing.rules(language)}\n\n"
+              "Check these pages.\n\n" + "\n\n".join(lines)
               + "\n\nReturn every real defect on these pages only.")
     out = await author.ask(prompt, SYSTEM, SCHEMA, images=[info[n]["proof"] for n in pages])
     return [i for i in out.get("issues", []) if i.get("page") in pages]

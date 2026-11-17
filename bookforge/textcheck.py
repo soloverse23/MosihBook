@@ -5,6 +5,7 @@ The report lives in textcheck.json beside book.yaml. Nothing changes until the w
 exact words are known is made in place, the others are made together by one page-scoped Claude edit."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -14,10 +15,12 @@ from pathlib import Path
 
 import yaml
 
-from . import author, control
+from . import author, control, proofing
 from .spec import Book, plain
 
 _lock = threading.Lock()
+BATCH = 8        # pages proofread per call: few enough to read every word
+PARALLEL = 3     # calls in flight at once
 
 SYSTEM = """\
 You are the proofreader of a children's book manuscript, before it is illustrated and printed. You are given
@@ -25,8 +28,8 @@ every page's words as they will be typeset (numbered as in book.yaml), the data 
 and the brief's rules. Find the real mistakes a careful editor would fix before the book goes to print.
 
 Look for:
-- spelling, grammar, accents and typography in the book's own language (e.g. French: tête not téte,
-  curly apostrophes ’, 3 dots not 4, a non-breaking space before ; : ! ? in French);
+- every error of spelling, conjugation, agreement, grammar, punctuation and typography in the book's own
+  language, following the language checklist given with the manuscript;
 - a missing or doubled word, a sentence cut off, a placeholder left in (TODO, [name], lorem ipsum), words in
   another language than the book's;
 - a character's name spelled two ways, or a fact that contradicts another page (a number, a color, who did what);
@@ -35,9 +38,10 @@ Look for:
 - a picture prompt that contradicts the words of its own page (three apples in the text, five in the prompt).
 
 Rules:
-- Report only real mistakes: something a reader, a parent or a teacher would clearly notice. You are not required
-  to find anything; an empty list is a good, normal answer. When unsure, leave it out. Never nitpick, never give
-  opinions on style or suggest rewrites for taste, never score. One mistake is one entry.
+- Every language error is a real mistake and is reported, however small. Beyond language, report only what a
+  reader, a parent or a teacher would clearly notice. You are not required to find anything; an empty list is a
+  good, normal answer. Never give opinions on style or suggest rewrites for taste, never score. When unsure
+  whether something is wrong, leave it out. One mistake is one entry; the same mistake on two pages is two.
 - Never translate. Quote the words exactly as they are written, accents included.
 - `page` is the book.yaml page number from the "page N" marks; use 0 for words outside the pages (title,
   back-cover blurb, dedication, character descriptions).
@@ -105,17 +109,30 @@ async def inspect(book_yaml: Path, brief: dict | None = None) -> dict:
     book = Book.model_validate(yaml.safe_load(text))
     ignored = [i for i in (load(book_yaml) or {"issues": []})["issues"] if i.get("status") == "ignored"]
     rules = author._brief_text(brief) if brief else ""
-    prompt = (f"The book is written in {book.language}.\n\n" + (f"The brief:\n{rules}\n\n" if rules else "")
-              + f"The manuscript:\n{manuscript_text(book)}\n")
+    base = (f"The book is written in {book.language}.\n\nLanguage checklist:\n{proofing.rules(book.language)}\n\n"
+            + (f"The brief:\n{rules}\n\n" if rules else "") + f"The whole manuscript:\n{manuscript_text(book)}\n")
     if ignored:
-        prompt += "\nAlready ignored by the writer:\n" + "\n".join(
+        base += "\nAlready ignored by the writer:\n" + "\n".join(
             f"- page {i['page']}: {i['problem']}" + (f" (\"{i['current']}\")" if i.get("current") else "") for i in ignored)
-    prompt += "\n\nReturn every real mistake in this manuscript."
-    out = await author.ask(prompt, SYSTEM, SCHEMA)
     n = len(book.pages)
+    # a few pages per call, each read word by word; the whole book is there for names and facts across pages
+    chunks = [list(range(a, min(a + BATCH, n + 1))) for a in range(1, n + 1, BATCH)] or [[]]
+    chunks[0] = [0] + chunks[0]
+    sem = asyncio.Semaphore(PARALLEL)
+
+    async def one(pages: list[int]) -> list[dict]:
+        shown = [p for p in pages if p]
+        span = (f"pages {shown[0]} to {shown[-1]}" if len(shown) > 1 else f"page {shown[0]}") if shown else ""
+        what = " and ".join(x for x in ("the words outside the pages (page 0)" if 0 in pages else "", span) if x)
+        async with sem:
+            out = await author.ask(f"{base}\n\nProofread {what} now, every word, against the checklist. Report "
+                                   f"mistakes on those pages only.", SYSTEM, SCHEMA)
+        return [i for i in out.get("issues", []) if isinstance(i, dict) and _page(i) in pages]
+
+    found = await asyncio.gather(*(one(c) for c in chunks))
     fresh = []
-    for i in out.get("issues", []):
-        if not isinstance(i, dict) or not str(i.get("problem", "")).strip() or not 0 <= int(i.get("page", -1)) <= n:
+    for i in (x for batch in found for x in batch):
+        if not str(i.get("problem", "")).strip():
             continue
         issue = {"page": int(i["page"]), "problem": i["problem"].strip(), "current": (i.get("current") or "").strip(),
                  "replace_with": (i.get("replace_with") or "").strip(), "prompt": (i.get("prompt") or "").strip()}
@@ -129,6 +146,13 @@ async def inspect(book_yaml: Path, brief: dict | None = None) -> dict:
     with _lock:
         _save(book_yaml, report)
     return report
+
+
+def _page(i: dict) -> int:
+    try:
+        return int(i.get("page", -1))
+    except (TypeError, ValueError):
+        return -1
 
 
 def view(book_yaml: Path) -> dict | None:
