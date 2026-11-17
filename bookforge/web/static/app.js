@@ -1804,12 +1804,19 @@ async function stepArt(host, b, slug) {
           <input class="input num" id="pp" type="number" min="1" max="10" value="${pilotN}" aria-label="Pages to try">
           <span class="small">pages</span><span class="faint small" id="pp-cost">~${money(pilotCost())}</span>
           <button class="btn sm" id="pilot">${icon("eye")}Try these first</button></div>` : "";
+      // one switch for the whole book: every image at high quality (each one can still be switched back below)
+      const allHigh = p.slots.every((s) => s.quality === "high");
+      const quality = allHigh ? "high" : p.slots.some((s) => s.quality === "high") ? `${esc(p.quality)} (some high)` : esc(p.quality);
+      const highAll = bz.drawing ? "" : `<label class="insp-q act-opt"><span><b class="small">All images in high quality</b>
+          <span class="faint xs">${left ? `${left} image${left > 1 ? "s" : ""} left: ~${money(left * p.high_cost_usd)} instead of ~${money(left * p.base_cost_usd)}`
+            : `~${money(p.high_cost_usd)} instead of ~${money(p.base_cost_usd)} an image, applies on the next redraw`}</span></span>
+          <span class="switch"><input type="checkbox" id="all-high" ${allHigh ? "checked" : ""} aria-label="All images in high quality"><i></i></span></label>`;
       panel.innerHTML = actionCard(left ? "Draw the illustrations" : "Every illustration is drawn",
-        `${left ? `${left} image${left > 1 ? "s" : ""} left, about <b>${money(missingCost())}</b>. ` : ""}All at <b>${esc(p.quality)}</b> quality (~${money(p.base_cost_usd)} each). Each image is generated once and only redrawn when you press Redo.
+        `${left ? `${left} image${left > 1 ? "s" : ""} left, about <b>${money(missingCost())}</b>. ` : ""}All at <b>${quality}</b> quality${allHigh ? "" : ` (~${money(p.base_cost_usd)} each)`}. Each image is generated once and only redrawn when you press Redo.
          <span class="act-p"><span class="progress ${left ? "" : "done"}"><i style="width:${Math.max(pct, 2)}%"></i></span><span class="num small">${done()} / ${p.slots.length}</span></span>`,
         bz.drawing ? `<button class="btn primary" disabled><span class="spin"></span>Drawing… progress is at the top</button>`
           : left ? `<button class="btn primary" id="all">${icon("sparkle")}Generate ${left === p.slots.length ? "all art" : `${left} missing`}</button>`
-          : next("build", "Next: print files"), bz.drawing ? "" : pilot) + `
+          : next("build", "Next: print files"), highAll + (bz.drawing ? "" : pilot)) + `
         <div class="card gallery" id="gal"></div>
         ${structureCard(p.structure, slug)}`;
       if (pilot && !bz.drawing) {
@@ -1820,6 +1827,15 @@ async function stepArt(host, b, slug) {
             run(btn, "pilot", { pages: pilotN });
         };
       }
+      $("#all-high")?.addEventListener("change", async (e) => {
+        const on = e.target.checked;
+        e.target.disabled = true;
+        try {
+          p = ctx.p = await api("PUT", `/api/books/${slug}/high`, { slots: p.slots.map((s) => s.id), on });
+          toast(`All images → ${on ? "high" : p.quality} · book now ~${money(p.estimate_usd)}`);
+        } catch (err) { e.target.checked = !on; toast(err.message, true); }
+        drawPanel();
+      });
       ctx.galDraw = artGallery($("#gal"), slug, ctx, { slots: p.slots.map((s) => ({ ...s })), title: "Illustrations",
         sub: `Click an image to inspect it. Switch on <b>High quality</b> for images that deserve it. <span class="faint">${esc(p.model)}</span>` });
       $("#all")?.addEventListener("click", async (e) => {

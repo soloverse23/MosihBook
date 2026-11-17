@@ -40,8 +40,37 @@ def test_pages_get_character_and_style_refs(project, monkeypatch):
     generate.run(project)
     page7 = next(v for k, v in seen.items() if k.startswith("Grandma Owl handing"))
     # character sheets come from the character directory, the style anchor from the art folder
-    assert page7 == ["pip/sheet.png", "grandma-owl/sheet.png", "art-mock/cover-front.png"]
+    refs7 = [r for r in page7 if not r.startswith("margin-guides/")]
+    assert refs7 == ["pip/sheet.png", "grandma-owl/sheet.png", "art-mock/cover-front.png"]
+    # a lettered page is drawn over the guide of its 9.7 mm margin, attached first
+    assert page7[0] == "margin-guides/p007.png" if project.book.images.text_in_art else page7 == refs7
     assert real.style_anchor
+
+
+def test_lettered_art_gets_the_exact_margin_guide(project):
+    from PIL import Image
+    from bookforge import kdp
+    from bookforge.imaging import margins
+    from bookforge.plan import plan
+    project.book.images.text_in_art = True
+    slots = {s.id: s for s in plan(project.book)}
+    page, cover = slots["p007"], slots["cover-front"]
+    (x0, y0, x1, y1), = margins.live_rects(project, page)
+    tw, th = project.book.trim_size
+    # 9.7 mm (plus the drawn-letter pad) from the trim, the bleed outside it
+    assert x0 * (tw + kdp.BLEED) == pytest.approx(kdp.BLEED + kdp.SAFE + kdp.ART_PAD)
+    assert y0 * (th + 2 * kdp.BLEED) == pytest.approx(kdp.BLEED + kdp.SAFE + kdp.ART_PAD)
+    assert margins.live_rects(project, cover)[0][0] * (tw + kdp.BLEED) == pytest.approx(kdp.SAFE + kdp.ART_PAD)
+    with Image.open(margins.guide(project, page)) as im:
+        w, h = im.size
+        assert im.getpixel((w // 2, h // 2)) == (246, 242, 233)       # words go here
+        assert im.getpixel((2, h // 2)) != (246, 242, 233)            # not in the margin band
+    assert w / h == pytest.approx(page.aspect, rel=0.01)
+    inside = {"has_text": True, "text_bounds": {"left": x0 + .01, "top": y0 + .01, "right": x1 - .01, "bottom": y1 - .01}}
+    assert margins.letters_inside(inside, [(x0, y0, x1, y1)])
+    inside["text_bounds"]["left"] = x0 / 2                            # a letter in the margin
+    assert not margins.letters_inside(inside, [(x0, y0, x1, y1)])
+    assert "SAFE AREA" in margins.safe_area_brief([(x0, y0, x1, y1)])
 
 
 def test_failed_review_is_flagged_never_redrawn(project, monkeypatch):
@@ -131,7 +160,7 @@ def test_misspelled_lettering_is_flagged_once(project, monkeypatch):
     seen = []
 
     class AlwaysMisspelled:
-        def review(self, image, prompt, refs, expected_text=""):
+        def review(self, image, prompt, refs, expected_text="", safe_area=""):
             seen.append(expected_text)
             return bad if expected_text.startswith("In the woods") else {**bad, "text_errors": [], "fix": ""}
     monkeypatch.setattr(generate, "get_reviewer", lambda s: AlwaysMisspelled())
