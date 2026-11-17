@@ -436,8 +436,10 @@ async function library() {
       <div class="row gap3">${books.length ? `<div class="seg" id="filter">${[["all", "All"], ["progress", "In progress"], ["ready", "Ready"]].map(([k, l]) =>
         `<button data-f="${k}" class="${k === filter ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
         <a class="btn primary" href="#/new">${icon("plus")}New book</a></div></div>
-    ${books.length ? `<div class="books">${books.filter(show).map((b) => `<div class="tile${b.origin ? " edition" : ""}">${b.status === "ready"
-      ? `<button class="btn sm tile-act" data-tr="${b.origin?.slug || b.slug}" data-title="${esc(b.origin?.title || b.title)}" title="Same pictures, translated text">${icon("globe")}Translate</button>` : ""}
+    ${books.length ? `<div class="books">${books.filter(show).map((b) => `<div class="tile${b.origin ? " edition" : ""}">
+      <div class="menu tile-act"><button class="btn icon sm" data-more="1" aria-label="More actions" aria-haspopup="true">${icon("more")}</button>
+        <div class="menu-pop" hidden>${b.status === "ready" ? `<button data-tr="${b.origin?.slug || b.slug}" data-title="${esc(b.origin?.title || b.title)}" title="Same pictures, translated text">${icon("globe")}Translate</button>` : ""}
+          <button class="danger" data-rm="${b.slug}" data-title="${esc(b.title)}">${icon("trash")}Remove book</button></div></div>
       <a class="book" href="#/book/${b.slug}">
         <div class="cover">${b.cover ? `<img src="/api/books/${b.slug}/front.jpg?${b.updated}" alt="">` : coverPlaceholder(b.title, b.type)}
           ${b.origin || b.editions ? `<span class="lang-tag">${icon("globe")}${esc(b.language)}</span>` : ""}</div>
@@ -451,7 +453,15 @@ async function library() {
         <p>Describe the book you want. Claude asks a few questions, outlines it and writes the manuscript, then MosiBooks illustrates and lays it out for print.</p>
         <a class="btn primary" href="#/new">${icon("plus")}New book</a></div></div>`}</div>`;
   $$("#filter button").forEach((b) => (b.onclick = () => { try { sessionStorage.setItem("lib-filter", b.dataset.f); } catch {} library(); }));
-  $$("[data-tr]").forEach((b) => (b.onclick = () => translateBook(b.dataset.tr, b.dataset.title, b)));
+  const closeMenus = () => $$(".tile .menu-pop").forEach((p) => (p.hidden = true));
+  $$("[data-more]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); const pop = b.nextElementSibling, was = pop.hidden; closeMenus(); pop.hidden = !was; }));
+  document.addEventListener("click", closeMenus, { once: true });
+  $$("[data-tr]").forEach((b) => (b.onclick = () => { closeMenus(); translateBook(b.dataset.tr, b.dataset.title, b); }));
+  $$("[data-rm]").forEach((b) => (b.onclick = async () => {
+    closeMenus();
+    if (!(await modal({ title: "Remove this book?", body: `“${esc(b.dataset.title)}” and all its files, art and builds will be removed. This can't be undone.`, confirm: "Remove", danger: true }))) return;
+    try { await api("DELETE", `/api/books/${b.dataset.rm}`); toast("Book removed"); library(); } catch (e) { toast(e.message, true); }
+  }));
 }
 
 // A finished book in another language: Claude translates the words, the illustrations are reused.
