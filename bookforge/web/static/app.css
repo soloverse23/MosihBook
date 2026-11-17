@@ -983,3 +983,9 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 .ctl-state svg { width: 14px; height: 14px; flex: none; }
 .ctl-how { border-top: 1px solid var(--line); padding-block: var(--s2); }
 .ctl-issue .note { margin: 0; }
+
+/* Text control: the page's words above its mistakes; a page an edit just changed glows for a moment */
+.tc-text { padding: var(--s3) var(--s4); border-left: 3px solid var(--line); background: var(--accent-soft); border-left-color: var(--accent-line); border-radius: 6px; }
+.tc-text .txt { white-space: pre-wrap; }
+.pg.flash { animation: pg-flash 2.4s ease-out; }
+@keyframes pg-flash { 0%, 30% { background: color-mix(in srgb, var(--accent, #6366F1) 14%, transparent); } 100% { background: transparent; } }

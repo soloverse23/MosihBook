@@ -330,12 +330,17 @@ def spec_field(pg) -> bool:
     return isinstance(pg, dict) and any(pg.get(f) for f in ("fill_in", "matching", "odd_one_out", "maze"))
 
 
-async def apply_text(current_yaml: str, issue: dict, prompt: str) -> str:
+async def apply_text(current_yaml: str, issue: dict, prompt: str, brief: dict | None = None) -> str:
     """Rewrite book.yaml for a text or layout fix. Raises if nothing changed, so a fix is never
     reported as done when the book is the same."""
     if prompt == issue.get("prompt") and (out := _direct(current_yaml, issue)):
         return out
-    new = await author.revise(current_yaml, instruction(issue, prompt))
+    try:
+        new = await author.revise(current_yaml, instruction(issue, prompt), **({"brief": brief} if brief else {}))
+    except author.AuthorError as e:
+        if "no change" in str(e):
+            raise author.AuthorError("Claude made no change to the book, so nothing was fixed. Edit the fix and try again.") from e
+        raise
     if yaml.safe_load(new) == yaml.safe_load(current_yaml):
         raise author.AuthorError("Claude made no change to the book, so nothing was fixed. Edit the fix and try again.")
     return new

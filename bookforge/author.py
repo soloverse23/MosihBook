@@ -352,12 +352,122 @@ async def write_book(brief: dict, outline_md: str, image_block: dict, refs: str 
     return await _validated(prompt, BOOK_TYPE, image_block, images, fixed, learning)
 
 
-async def revise(book_yaml: str, instruction: str) -> str:
-    book_type = (yaml.safe_load(book_yaml) or {}).get("type", "picture_book")
-    images = (yaml.safe_load(book_yaml) or {}).get("images", {})
-    prompt = (f"Current book.yaml:\n```yaml\n{book_yaml}```\n\nApply this change: {instruction}\n"
-              "Keep everything else as it is. Output the complete updated YAML in one ```yaml block.")
-    return await _validated(prompt, book_type, images)
+KEPT = ("type", "paper", "language", "page_numbers", "sections", "images")  # never changed by an edit
+
+EDIT_FORMAT = """\
+Answer with only the parts that change, in one ```yaml block, in this shape (leave out every key you do not need):
+```yaml
+pages:          # pages that change, by their number (the "# page N" marks); each one written out complete
+  5:
+    text: ...
+    prompt: ...
+delete: [7]     # pages to remove, by their number
+insert:         # new pages: `after` is the number of the page they follow (0 = at the very start)
+  - after: 3
+    page: {text: ..., prompt: ...}
+book:           # fields outside `pages` that change (title, style, characters, back_cover, front_matter,
+  title: ...    # cover_prompt, ...), each written out complete
+```
+Page numbers always mean the numbers in the "# page N" marks of the book as it is now. A page you list under
+`pages` replaces that page entirely: copy every field you do not change word for word. Never list a page or a
+field the change does not touch. When nothing needs to change, answer with an empty block."""
+
+
+def numbered(data: dict) -> str:
+    """book.yaml with a "# page N" mark before every page, so a request about page 12 lands on page 12."""
+    head = {k: v for k, v in data.items() if k not in ("pages", "images")}
+    out = [yaml.safe_dump(head, sort_keys=False, allow_unicode=True, width=100).rstrip(), "pages:"]
+    for n, pg in enumerate(data.get("pages") or [], 1):
+        body = yaml.safe_dump([pg], sort_keys=False, allow_unicode=True, width=100).rstrip()
+        out += [f"# page {n}", body]
+    return "\n".join(out) + "\n"
+
+
+def apply_patch(data: dict, patch: dict) -> dict:
+    """The book with Claude's changes spliced in. Pages and fields the patch does not name stay exactly
+    as they were."""
+    if not isinstance(patch, dict):
+        raise ValueError("the answer is not a list of changes")
+    pages = list(data.get("pages") or [])
+    n = len(pages)
+
+    def num(k) -> int:
+        try:
+            k = int(k)
+        except (TypeError, ValueError):
+            raise ValueError(f"{k!r} is not a page number")
+        return k
+
+    for k, pg in (patch.get("pages") or {}).items():
+        if not 1 <= num(k) <= n or not isinstance(pg, dict):
+            raise ValueError(f"page {k}: there is no such page (the book has {n}), or it is not written out")
+        pages[num(k) - 1] = pg
+    gone = {num(k) for k in (patch.get("delete") or [])}
+    if any(not 1 <= k <= n for k in gone):
+        raise ValueError(f"delete: the book has pages 1 to {n}")
+    after: dict[int, list] = {}
+    for ins in patch.get("insert") or []:
+        a = num((ins or {}).get("after", n))
+        if not 0 <= a <= n or not isinstance(ins.get("page"), dict):
+            raise ValueError(f"insert after {a}: there is no such page, or the new page is not written out")
+        after.setdefault(a, []).append(ins["page"])
+    new_pages = list(after.get(0, []))
+    for i, pg in enumerate(pages, 1):
+        if i not in gone:
+            new_pages.append(pg)
+        new_pages += after.get(i, [])
+    out = {**data, **{k: v for k, v in (patch.get("book") or {}).items() if k not in ("pages", *KEPT)}}
+    out["pages"] = new_pages
+    return out
+
+
+async def revise(book_yaml: str, instruction: str, brief: dict | None = None) -> str:
+    """Make one change to the book. Claude sees the book with numbered pages and sends back only what changes;
+    everything else is kept as it was, word for word, along with the settings that are not its to change
+    (type, paper, language, structure, images) and the brief's learning rules. Raises when nothing changed."""
+    before = yaml.safe_load(book_yaml) or {}
+    book_type = before.get("type", BOOK_TYPE)
+    fixed = {k: before[k] for k in KEPT if k in before}
+    learning = {k: (brief or {})["learning"][k] for k in ("topic", "explain", "marking")
+                if not _empty(((brief or {}).get("learning") or {}).get(k))}
+    style = (f"\n\nThe brief this book was written from. Every word you write keeps its voice, writing style, "
+             f"reading level and learning rules:\n{_brief_text(brief)}") if brief and _brief_text(brief) else ""
+    prompt = (f"The book, with each page numbered:\n```yaml\n{numbered(before)}```{style}\n\n"
+              f"Make this change: {instruction}\n\nChange only what this asks, and nothing else in the book: "
+              f"do not reword, tidy or improve anything it does not mention.\n\n{EDIT_FORMAT}")
+    system = _system(book_type)
+    text = _fenced(await ask(prompt, system), "yaml")
+    for attempt in range(2):
+        try:
+            data = apply_patch(before, yaml.safe_load(text) or {})
+            data.update(fixed)
+            if learning:
+                data["learning"] = {**(data.get("learning") or {}), **learning}
+            if errs := structure_errors(data):
+                raise ValueError("the pages do not follow the book structure: " + "; ".join(errs))
+            if errs := activity_errors(data):
+                raise ValueError("game pages without their data: " + "; ".join(errs))
+            spec.Book.model_validate(data)
+            break
+        except (ValidationError, ValueError, yaml.YAMLError, TypeError, AttributeError) as e:
+            if attempt == 1:
+                raise AuthorError(f"Claude's change did not fit the book: {e}") from e
+            text = _fenced(await ask(f"{prompt}\n\nYour previous answer:\n```yaml\n{text}```\ncould not be applied:\n"
+                                     f"{e}\nFix it and answer again in the same shape.", system), "yaml")
+    if data == before:
+        raise AuthorError("Claude made no change to the book. Say more precisely what should change (which page, "
+                          "which words) and try again.")
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
+
+
+def changed_pages(old_yaml: str, new_yaml: str) -> dict:
+    """What an edit changed: the page numbers whose content differs, pages added or removed, other fields."""
+    a, b = yaml.safe_load(old_yaml) or {}, yaml.safe_load(new_yaml) or {}
+    pa, pb = a.get("pages") or [], b.get("pages") or []
+    pages = [i for i, (x, y) in enumerate(zip(pa, pb), 1) if x != y]
+    fields = [k for k in dict.fromkeys([*a, *b]) if k != "pages" and a.get(k) != b.get(k)]
+    return {"pages": pages, "added": max(0, len(pb) - len(pa)), "removed": max(0, len(pa) - len(pb)),
+            "fields": fields}
 
 
 def activity_errors(data: dict) -> list[str]:

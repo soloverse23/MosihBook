@@ -10,7 +10,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import author, characters, control, exports, kdp, settings, spec, templates
+from .. import author, characters, control, exports, kdp, settings, spec, templates, textcheck
 from ..art.lint import lint
 from ..art.generate import review_notes, serious_problems
 from ..imaging import margins
@@ -313,9 +313,64 @@ async def claude_revise(slug: str, body: dict = Body(...)):
     current = body.get("yaml") or state.read_yaml(slug)
     if not current or not body.get("instruction"):
         raise HTTPException(400, "nothing to revise")
-    text = await _claude(author.revise(current, body["instruction"]))
+    try:
+        import yaml
+        yaml.safe_load(current)["pages"]
+    except Exception:
+        raise HTTPException(422, "book.yaml has errors: fix them in the YAML view first")
+    brief = state.load_state(slug).get("brief") or {}
+    text = await _claude(author.revise(current, body["instruction"], brief=brief))
     state.write_yaml(slug, text)
-    return {"yaml": text, "pages_view": state.pages_view(text)}
+    return {"yaml": text, "pages_view": state.pages_view(text), "changed": author.changed_pages(current, text)}
+
+
+# ---- text control: proofreading the manuscript before any art is paid for -------------------
+
+def _manuscript(slug: str) -> Path:
+    f = _dir(slug) / "book.yaml"
+    if not f.exists():
+        raise HTTPException(409, "write the manuscript first")
+    return f
+
+
+@app.get("/api/books/{slug}/textcheck")
+def textcheck_report(slug: str):
+    return {"report": textcheck.view(_manuscript(slug))}
+
+
+@app.post("/api/books/{slug}/textcheck/check")
+async def textcheck_check(slug: str):
+    """Claude proofreads every page's words and lists the real mistakes, each with its fix."""
+    f = _manuscript(slug)
+    if err := state.validate_yaml(f.read_text()):
+        raise HTTPException(422, f"book.yaml has errors, fix them in the Manuscript step first: {err}")
+    await _claude(textcheck.inspect(f, state.load_state(slug).get("brief") or {}))
+    return {"report": textcheck.view(f)}
+
+
+@app.put("/api/books/{slug}/textcheck/{issue_id}")
+def textcheck_issue(slug: str, issue_id: str, body: dict = Body(...)):
+    if body.get("status") not in ("open", "ignored"):
+        raise HTTPException(400, "status must be open or ignored")
+    try:
+        textcheck.set_status(_manuscript(slug), issue_id, body["status"])
+    except KeyError:
+        raise HTTPException(404)
+    return {"ok": True}
+
+
+@app.post("/api/books/{slug}/textcheck/apply")
+async def textcheck_apply(slug: str, body: dict = Body(...)):
+    """Make the fixes [{id, prompt}] in book.yaml: exact word swaps at once, the rest in one Claude edit."""
+    f = _manuscript(slug)
+    items = body.get("items") or []
+    if not items:
+        raise HTTPException(400, "pick a fix first")
+    try:
+        out = await textcheck.apply(f, items, state.load_state(slug).get("brief") or {})
+    except KeyError as e:
+        raise HTTPException(404, f"no problem {e.args[0]!r}: check the text again")
+    return {**out, "report": textcheck.view(f)}
 
 
 @app.post("/api/books/{slug}/translate")

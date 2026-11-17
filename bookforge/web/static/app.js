@@ -3,7 +3,7 @@ import { royalty, inkForPaper, isLarge, SYMBOL, MARKET, PRICING_SOURCE } from ".
 const view = document.getElementById("view");
 const STEPS = [
   ["brief", "Brief"], ["questions", "Questions"], ["outline", "Outline"], ["manuscript", "Manuscript"],
-  ["art", "Art & build"], ["control", "Control & correction"], ["publish", "Publish"],
+  ["textcheck", "Text control"], ["art", "Art & build"], ["control", "Control & correction"], ["publish", "Publish"],
 ];
 const TYPES = {
   picture_book: { label: "Picture book", icon: "image", trim: "8.5x8.5", paper: "premium_color", hint: "Ages 2–8 · art on every page" },
@@ -1318,7 +1318,7 @@ async function bookView(slug, step) {
   // "preview" was its own step before it merged into Art & build; old links and saved state land there
   const saved = st.step === "preview" ? "art" : st.step;
   if (step === "preview") step = "art";
-  const reached = Math.max(STEPS.findIndex(([k]) => k === saved), b.yaml ? 3 : 0, b.last_build ? 4 : 0, b.last_build === "real" ? 5 : 0);
+  const reached = Math.max(STEPS.findIndex(([k]) => k === saved), b.yaml ? 3 : 0, b.last_build ? 5 : 0, b.last_build === "real" ? 6 : 0);
   step ||= saved || (b.yaml ? "manuscript" : "brief");
   const idx = STEPS.findIndex(([k]) => k === step);
   view.innerHTML = `<div class="page">
@@ -1344,7 +1344,7 @@ async function bookView(slug, step) {
     await api("DELETE", `/api/books/${slug}`); toast("Book deleted"); location.hash = "#/";
   };
   const steps = { brief: stepBrief, questions: stepQuestions, outline: stepOutline, manuscript: stepManuscript,
-    art: stepArt, control: stepControl, publish: stepPublish };
+    textcheck: stepTextcheck, art: stepArt, control: stepControl, publish: stepPublish };
   await steps[step]($("#step"), b, slug);
 }
 
@@ -1492,10 +1492,10 @@ function stepManuscript(host, b, slug) {
         <div class="card"><div class="card-b stack tight">
           <label class="label" for="ins">Ask Claude to change something</label>
           <textarea class="input" id="ins" rows="4" placeholder="Make page 5 funnier. Shorten the blurb…"></textarea>
-          <button class="btn" id="rev">${icon("wand")}Apply with Claude</button></div></div>
+          <button class="btn" id="rev" disabled style="opacity:.45;filter:blur(.6px)">${icon("wand")}Correct with Claude</button></div></div>
         <div class="card"><div class="card-b stack">
-          <div><h3>Next: art &amp; build</h3><p class="muted small">See every illustration and its cost, test the look with a pilot, then build the print files.</p></div>
-          <a class="btn primary" href="#/book/${slug}/art">Go to art${icon("arrow")}</a></div></div>
+          <div><h3>Next: text control</h3><p class="muted small">Claude proofreads every page's words and lists the real mistakes, before any art is paid for.</p></div>
+          <a class="btn primary" id="nexttc" href="#/book/${slug}/textcheck">Check the text${icon("arrow")}</a></div></div>
       </div></div>`;
   const setValid = (err) => {
     $("#err").innerHTML = err ? `<div style="margin-bottom:16px">${note("err", `<b>book.yaml has errors</b><pre>${esc(err)}</pre>`)}</div>` : "";
@@ -1521,7 +1521,8 @@ function stepManuscript(host, b, slug) {
     const r = await api("POST", `/api/books/${slug}/claude/revise`, { instruction, yaml: $("#yaml").value });
     $("#yaml").value = r.yaml; showPages(r.pages_view); setValid(null);
     showLint();
-    toast("Manuscript updated");
+    toast(changedText(r.changed));
+    flashPages(r.changed?.pages || []);
   };
   // the prompt check, shown here where it can still be fixed for free, before any art is paid for
   const showLint = async () => {
@@ -1547,11 +1548,38 @@ function stepManuscript(host, b, slug) {
   if (!kindsCache && shown.some((p) => p.kind)) getKinds().then(() => showPages(shown)).catch(() => {});
   showLint();
   voiceify(host);
+  // text typed: "Correct with Claude" becomes the active button and the next-step button turns white;
+  // no text: Correct is blurred and disabled, the next step is the main button
+  const syncRev = () => {
+    const has = !!$("#ins").value.trim(), rev = $("#rev"), next = $("#nexttc");
+    rev.disabled = !has; rev.classList.toggle("primary", has);
+    rev.style.opacity = has ? "" : ".45"; rev.style.filter = has ? "" : "blur(.6px)";
+    next.classList.toggle("primary", !has);
+  };
+  $("#ins").addEventListener("input", syncRev);
   $("#rev").onclick = (e) => busy(e.currentTarget, "Claude is editing…", async () => {
     const instruction = $("#ins").value.trim();
     if (!instruction) throw new Error("Describe the change first");
-    await revise(instruction); $("#ins").value = "";
+    await revise(instruction); $("#ins").value = ""; syncRev();
   });
+}
+
+// what an edit changed, in a few words: "Changed page 5 and the title"
+function changedText(c) {
+  if (!c) return "Manuscript updated";
+  const pl = (n, w) => `${n} ${w}${n > 1 ? "s" : ""}`;
+  const parts = [];
+  if (c.pages.length) parts.push(c.pages.length > 4 ? pl(c.pages.length, "page") : `page${c.pages.length > 1 ? "s" : ""} ${c.pages.join(", ")}`);
+  if (c.added) parts.push(`${pl(c.added, "new page")}`);
+  if (c.removed) parts.push(`${pl(c.removed, "page")} removed`);
+  if (c.fields.length) parts.push(c.fields.map((f) => f.replace(/_/g, " ")).join(", "));
+  return parts.length ? `Changed ${parts.join(" · ")}` : "Manuscript updated";
+}
+// the pages an edit touched glow for a moment, the first one scrolled into view
+function flashPages(nums) {
+  const cards = nums.map((n) => document.getElementById(`pg-${n}`)).filter(Boolean);
+  cards[0]?.scrollIntoView({ behavior: "smooth", block: "center" });
+  cards.forEach((c) => { c.classList.add("flash"); setTimeout(() => c.classList.remove("flash"), 2400); });
 }
 
 async function loadPlan(slug) {
@@ -1927,6 +1955,118 @@ const FIX_LABEL = { image: "Redraw the picture", margin: "Redraw inside the marg
 const PAID_FIX = new Set(["image", "margin"]);
 // how several fixes go ahead together (said in the confirm dialogs and above the list while they run)
 const HOW_FIXES = "How they run: all the pictures are redrawn together, at the same time. The word fixes are made by Claude one after another, alongside the pictures. When everything is done, the book is rebuilt once. You can leave this page meanwhile: progress stays at the top.";
+
+// Text control: Claude proofreads the manuscript's words (no pictures), before any art is paid for. Each real
+// mistake comes with its fix; Apply makes it in book.yaml (an exact word swap at once, the rest by one Claude
+// edit that touches only those pages). Ignored mistakes stay ignored on every re-check.
+async function stepTextcheck(host, b, slug) {
+  const head = stepHead("Text control", "Claude proofreads every page's words, the games' answers and the picture prompts against the text. Nothing changes until you apply a fix.");
+  if (!b.yaml) { host.innerHTML = head + note("info", `No manuscript yet. <a href="#/book/${slug}/outline">Approve the outline</a> and Claude will write it.`); return; }
+  if (b.yaml_error) { host.innerHTML = head + note("err", `book.yaml has errors. <a href="#/book/${slug}/manuscript">Fix them in the Manuscript step</a> first.`); return; }
+  let report = (await api("GET", `/api/books/${slug}/textcheck`)).report;
+  let pages = b.pages_view, working = null;   // working: "check" | "apply"
+  host.innerHTML = head + `<div class="stack"><div class="ctl-sticky"><div id="tc-head"></div></div><div class="stack" id="tc"></div></div>`;
+  const live = () => host.isConnected;
+  const open = () => (report?.issues || []).filter((i) => i.status === "open");
+  const where = (n) => (n ? `Page ${n}` : "Title, blurb &amp; characters");
+
+  const issueHtml = (i) => `<div class="ctl-issue ${i.status}" id="tc-${i.id}">
+      <p class="ctl-problem">${esc(i.problem)}</p>
+      ${i.replace_with ? `<p class="ctl-swap">${i.current ? `<s>${esc(i.current)}</s> → ` : ""}<b>${esc(i.replace_with)}</b></p>` : ""}
+      ${i.status === "applied" ? `<span class="badge ok">Fixed</span>` : `${i.error ? note("err", `<b>Not fixed:</b> ${esc(i.error)}`) : ""}
+        <textarea class="input" rows="2" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
+        <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}" ${working ? "disabled" : ""}>${icon("check")}${i.error ? "Try again" : "Apply fix"}</button>
+          <button class="btn sm ghost" data-skip="${i.id}" ${working ? "disabled" : ""}>Ignore</button></div>`}</div>`;
+
+  function drawHead() {
+    const box = $("#tc-head", host);
+    if (!report) { box.innerHTML = ""; return; }
+    const shown = report.issues.filter((i) => i.status !== "ignored"), todo = open().length;
+    const line = working === "check" ? `<span class="spin"></span>Claude is reading the manuscript…`
+      : working === "apply" ? `<span class="spin"></span>Making the fixes…`
+      : shown.length ? `<b>${todo} to fix</b>${shown.length > todo ? ` · ${shown.length - todo} fixed` : ""}` : `<b>No mistakes found</b>`;
+    box.innerHTML = `<div class="card"><div class="card-b row between">
+      <div class="row gap2">${line}<span class="faint small"> · ${report.pages} pages read</span></div>
+      <div class="row gap2">
+        ${todo > 1 ? `<button class="btn" id="ignore-all" ${working ? "disabled" : ""}>Ignore all (${todo})</button>
+          <button class="btn primary" id="apply-all" ${working ? "disabled" : ""}>${icon("check")}Apply all (${todo})</button>` : ""}
+        <button class="btn" id="check" ${working ? "disabled" : ""}>${icon("refresh")}Check again</button>
+        ${!todo && !working ? `<a class="btn primary" href="#/book/${slug}/art">Next: art &amp; build${icon("arrow")}</a>` : ""}</div></div>
+      ${report.stale && !working ? `<div class="card-b faint small">The manuscript changed since this check. Press “Check again” to read the new version.</div>` : ""}</div>`;
+  }
+
+  function draw() {
+    const box = $("#tc", host);
+    if (!report) {
+      $("#tc-head", host).innerHTML = "";
+      box.innerHTML = `<div class="card act"><div class="act-b"><h3>Check the text</h3>
+        <p>Claude reads every page for real mistakes: spelling, grammar, a name written two ways, a wrong answer in a game, a picture prompt that says something else than the words. It changes nothing by itself.</p></div>
+        <div class="act-a">${working ? `<button class="btn primary" disabled><span class="spin"></span>Reading…</button>`
+          : `<button class="btn primary" id="check">${icon("eye")}Check the text</button>`}</div></div>
+        <p class="faint small"><a href="#/book/${slug}/art">Skip to art &amp; build</a></p>`;
+      return;
+    }
+    drawHead();
+    const nums = [...new Set(report.issues.filter((i) => i.status !== "ignored").map((i) => i.page))];
+    box.innerHTML = nums.map((n) => {
+      const pg = n ? pages[n - 1] : null;
+      const txt = pg ? esc(pg.text || "").replace(/\[\[(.+?)\]\]/gs, '<mark class="hl">$1</mark>') : "";
+      return `<div class="card"><div class="card-b stack">
+        <h3>${where(n)}</h3>
+        ${pg && (pg.chapter || txt) ? `<div class="tc-text">${pg.chapter ? `<div class="chapter">${esc(pg.chapter)}</div>` : ""}<div class="txt">${txt}</div></div>` : ""}
+        ${report.issues.filter((i) => i.page === n && i.status !== "ignored").map(issueHtml).join("")}</div></div>`;
+    }).join("");
+    voiceify(box);
+  }
+
+  async function run(kind, fn) {
+    working = kind; draw();
+    try { await fn(); } catch (e) { toast(e.message, true); }
+    working = null;
+    if (live()) draw();
+  }
+  const check = () => run("check", async () => {
+    report = (await api("POST", `/api/books/${slug}/textcheck/check`)).report;
+    toast(open().length ? "The list of mistakes is below." : "No mistakes found.");
+  });
+  const apply = (ids) => run("apply", async () => {
+    const items = ids.map((id) => ({ id, prompt: ($(`[data-prompt="${id}"]`, host)?.value || "").trim() }));
+    const r = await api("POST", `/api/books/${slug}/textcheck/apply`, { items });
+    report = r.report;
+    if (r.applied.length) {
+      const fresh = await api("GET", `/api/books/${slug}`);
+      pages = fresh.pages_view;
+      toast(`${r.applied.length === 1 ? "Fix made" : `${r.applied.length} fixes made`} · ${changedText(r.changed).replace(/^Changed /, "changed ")}`);
+    }
+    if (r.error) toast(r.error, true);
+  });
+
+  host.addEventListener("click", async (e) => {
+    const t = e.target.closest("button");
+    if (!t || !live() || working) return;
+    if (t.id === "check") return check();
+    if (t.dataset.apply) return apply([t.dataset.apply]);
+    if (t.id === "apply-all") {
+      const list = open();
+      if (!(await modal({ title: `Apply all ${list.length} fixes?`, body: "Exact word swaps are made at once; the others in one Claude edit that changes only those pages. Nothing is redrawn.", confirm: "Apply all" }))) return;
+      return apply(list.map((i) => i.id));
+    }
+    if (t.dataset.skip) {
+      try { await api("PUT", `/api/books/${slug}/textcheck/${t.dataset.skip}`, { status: "ignored" }); }
+      catch (err) { return toast(err.message, true); }
+      report.issues.find((x) => x.id === t.dataset.skip).status = "ignored";
+      return draw();
+    }
+    if (t.id === "ignore-all") {
+      const list = open();
+      if (!(await modal({ title: `Ignore all ${list.length} mistakes?`, body: "They are hidden now and stay hidden on every re-check.", confirm: "Ignore all" }))) return;
+      try { for (const i of list) { await api("PUT", `/api/books/${slug}/textcheck/${i.id}`, { status: "ignored" }); i.status = "ignored"; } }
+      catch (err) { toast(err.message, true); }
+      return draw();
+    }
+  });
+  draw();
+}
 
 async function stepControl(host, b, slug) {
   const head = stepHead("Control & correction", "Claude reads every page of the built book, lists the real problems and writes the fix for each one.");

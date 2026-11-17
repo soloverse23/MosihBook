@@ -369,7 +369,8 @@ def _texts(job: Job, p: Project) -> None:
         try:
             if not issue:
                 raise KeyError("the book was checked again meanwhile: this problem is gone")
-            text = asyncio.run(control.apply_text(state.read_yaml(job.slug), issue, t["prompt"]))
+            text = asyncio.run(control.apply_text(state.read_yaml(job.slug), issue, t["prompt"],
+                                                      state.load_state(job.slug).get("brief")))
             state.write_yaml(job.slug, text)
             control.set_status(p, t["issue"], "applied", t["prompt"], error="")
             job.log("  done")

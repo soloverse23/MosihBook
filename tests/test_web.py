@@ -389,7 +389,7 @@ def test_control_and_correction(client, monkeypatch):
 
     seen = []
 
-    async def revise(yaml_text, instruction):
+    async def revise(yaml_text, instruction, brief=None):
         seen.append(instruction)
         return yaml_text
     monkeypatch.setattr(author, "revise", revise)
@@ -420,7 +420,7 @@ def test_control_and_correction(client, monkeypatch):
     assert got["status"] == "open" and "no change" in got["error"] and got["job"] is None
 
     # a real change is written to book.yaml, the issue is applied and the book is built again
-    async def revise_ok(yaml_text, instruction):
+    async def revise_ok(yaml_text, instruction, brief=None):
         return yaml_text.replace("title: ", "title: Fixed ", 1)
     monkeypatch.setattr(author, "revise", revise_ok)
     c = client.post(f"/api/books/{slug}/control/apply", json={"items": [{"id": text_issue["id"], "prompt": "Fix the spelling."}]})
@@ -480,3 +480,85 @@ def test_book_queue_merges_redraws_and_runs_words_beside_pictures(client, monkey
             break
         time.sleep(0.02)
     assert order == ["art", "text", "regen", "build"] and not q
+
+
+def test_revise_changes_only_the_pages_claude_names(client, monkeypatch):
+    """Claude sends back only what changes; every other page stays word for word, the brief's style reaches it,
+    and an edit that changes nothing is refused instead of reported as done."""
+    import yaml
+    slug = client.post("/api/books", json={"type": "picture_book", "idea": "a fox",
+                                           "writing": {"notes": "short rhyming lines"}}).json()["slug"]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": EXAMPLE.read_text()})
+    before = yaml.safe_load(EXAMPLE.read_text())
+    seen = []
+
+    async def ask(prompt, system, schema=None, images=()):
+        seen.append(prompt)
+        pg = dict(before["pages"][1], text="A brand new second page.")
+        return f"```yaml\n{yaml.safe_dump({'pages': {2: pg}, 'book': {'type': 'comic'}})}```"
+    monkeypatch.setattr(author, "ask", ask)
+    r = client.post(f"/api/books/{slug}/claude/revise", json={"instruction": "Rewrite page 2."}).json()
+    after = yaml.safe_load(r["yaml"])
+    assert after["pages"][1]["text"] == "A brand new second page."
+    assert after["pages"][0] == before["pages"][0] and after["pages"][2:] == before["pages"][2:]
+    assert after["type"] == before["type"]                       # settings are not Claude's to change
+    assert r["changed"]["pages"] == [2] and r["changed"]["fields"] == []
+    assert "# page 2" in seen[0] and "short rhyming lines" in seen[0]
+
+    async def nothing(prompt, system, schema=None, images=()):
+        return "```yaml\n{}\n```"
+    monkeypatch.setattr(author, "ask", nothing)
+    r = client.post(f"/api/books/{slug}/claude/revise", json={"instruction": "Rewrite page 2."})
+    assert r.status_code == 502 and "no change" in r.json()["detail"]
+
+
+def test_apply_patch_inserts_and_deletes_by_the_old_numbers():
+    data = {"title": "T", "pages": [{"text": "1"}, {"text": "2"}, {"text": "3"}]}
+    out = author.apply_patch(data, {"delete": [2], "insert": [{"after": 0, "page": {"text": "0"}},
+                                                               {"after": 3, "page": {"text": "4"}}]})
+    assert [p["text"] for p in out["pages"]] == ["0", "1", "3", "4"]
+    with pytest.raises(ValueError):
+        author.apply_patch(data, {"pages": {9: {"text": "x"}}})
+
+
+def test_text_control_before_the_art(client, monkeypatch):
+    import yaml
+    slug = client.post("/api/books", json={"type": "picture_book", "idea": "a fox"}).json()["slug"]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": EXAMPLE.read_text()})
+    assert client.get(f"/api/books/{slug}/textcheck").json() == {"report": None}
+    book = yaml.safe_load(EXAMPLE.read_text())
+    word = book["pages"][1]["text"].split()[0]
+
+    async def ask(prompt, system, schema=None, images=()):
+        assert not images and "page 2" in prompt
+        return {"issues": [{"page": 2, "problem": "A word is misspelled.", "current": word, "replace_with": "Zzfixed",
+                            "prompt": "Fix the spelling."},
+                           {"page": 3, "problem": "Two names for the fox.", "prompt": "Use one name on page 3."},
+                           {"page": 99, "problem": "No such page.", "prompt": "x"}]}
+    monkeypatch.setattr(author, "ask", ask)
+    r = client.post(f"/api/books/{slug}/textcheck/check").json()["report"]
+    assert [i["page"] for i in r["issues"]] == [2, 3] and not r["stale"]
+    a, b = r["issues"]
+
+    # an exact word swap is made at once, on its own page only, without Claude
+    async def no_revise(*a, **k):
+        raise AssertionError("Claude was asked")
+    monkeypatch.setattr(author, "revise", no_revise)
+    out = client.post(f"/api/books/{slug}/textcheck/apply", json={"items": [{"id": a["id"]}]}).json()
+    assert out["applied"] == [a["id"]] and out["changed"]["pages"] == [2]
+    now = yaml.safe_load(state.read_yaml(slug))
+    assert now["pages"][1]["text"].startswith("Zzfixed") and now["pages"][2:] == book["pages"][2:]
+    assert not out["report"]["stale"]
+
+    # the rest goes to one Claude edit; a failure stays on the issue
+    async def fails(text, instruction, brief=None):
+        raise author.AuthorError("Claude made no change to the book.")
+    monkeypatch.setattr(author, "revise", fails)
+    out = client.post(f"/api/books/{slug}/textcheck/apply", json={"items": [{"id": b["id"]}]}).json()
+    assert out["applied"] == [] and "no change" in out["report"]["issues"][1]["error"]
+
+    # ignored stays ignored on the next check
+    client.put(f"/api/books/{slug}/textcheck/{b['id']}", json={"status": "ignored"})
+    monkeypatch.setattr(author, "ask", ask)
+    r = client.post(f"/api/books/{slug}/textcheck/check").json()["report"]
+    assert [i["status"] for i in r["issues"] if i["page"] == 3] == ["ignored"]
