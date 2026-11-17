@@ -19,7 +19,8 @@ from ..settings import openai_key as _openai_key
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["score", "has_text", "text_errors", "text_legible", "text_in_safe_area", "character_issues",
+    "required": ["score", "has_text", "text_errors", "text_legible", "text_in_safe_area", "text_bounds",
+                 "character_issues",
                  "anatomy_issues", "composition_issues", "style_issues", "fix"],
     "properties": {
         "score": {"type": "integer", "description": "1-10 overall fitness for a professionally printed book"},
@@ -30,11 +31,18 @@ SCHEMA = {
                                        "missing punctuation); empty when it matches exactly or nothing was expected"},
         "text_legible": {"type": "boolean", "description": "the lettering is crisp and easy for a child to read; "
                                                            "true when no text was expected"},
-        "text_in_safe_area": {"type": "boolean", "description": "every letter (and its glow or shadow) sits at least 10% "
-                                                                "of the image height inside the top and bottom edges "
-                                                                "and 8% of the width inside the left and right edges; "
-                                                                "false when any letter comes closer; true when no "
-                                                                "text was expected"},
+        "text_in_safe_area": {"type": "boolean", "description": "every letter (and its glow or shadow) sits inside the "
+                                                                "SAFE AREA of the brief (when none is given: at least "
+                                                                "10% of the image height inside the top and bottom "
+                                                                "edges and 8% of the width inside the left and right "
+                                                                "edges); false when any letter comes closer; true "
+                                                                "when no text was expected"},
+        "text_bounds": {"type": "object", "additionalProperties": False,
+                        "required": ["left", "top", "right", "bottom"],
+                        "description": "the smallest box holding every letter in the image (with its glow or "
+                                       "shadow), as fractions 0-1 of the image width (left, right) and height "
+                                       "(top, bottom), measured from the top-left corner; all 0 when there is no text",
+                        "properties": {k: {"type": "number"} for k in ("left", "top", "right", "bottom")}},
         "character_issues": {"type": "array", "items": {"type": "string"}},
         "anatomy_issues": {"type": "array", "items": {"type": "string"}},
         "composition_issues": {"type": "array", "items": {"type": "string"}},
@@ -103,10 +111,11 @@ class OpenAIReviewer:
         self.client = OpenAI(api_key=_openai_key())
         self.model = model
 
-    def review(self, image: Path, prompt: str, refs: list[Ref], expected_text: str = "") -> dict:
+    def review(self, image: Path, prompt: str, refs: list[Ref], expected_text: str = "", safe_area: str = "") -> dict:
         brief = "BRIEF (the prompt the illustrator was given):\n" + prompt
         if expected_text:
-            brief = f"{LETTERED}\n\nEXPECTED TEXT (exact):\n<<<\n{expected_text}\n>>>\n\n{brief}"
+            brief = (f"{LETTERED}\n\nEXPECTED TEXT (exact):\n<<<\n{expected_text}\n>>>\n\n"
+                     + (f"{safe_area}\n\n" if safe_area else "") + brief)
         if refs:
             brief += "\n\nREFERENCE IMAGES (in order): " + "; ".join(f"{i}: {r.role}" for i, r in enumerate(refs, 1))
         content = [{"type": "input_text", "text": brief}]
@@ -134,9 +143,10 @@ class MockReviewer:
     def find_items(self, image: Path, language: str = "") -> list[dict]:
         return [{"name": "stars", "count": 3}, {"name": "cat", "count": 1}, {"name": "flowers", "count": 5}]
 
-    def review(self, image: Path, prompt: str, refs: list[Ref], expected_text: str = "") -> dict:
+    def review(self, image: Path, prompt: str, refs: list[Ref], expected_text: str = "", safe_area: str = "") -> dict:
+        bounds = dict(left=0.2, top=0.2, right=0.8, bottom=0.8) if expected_text else dict(left=0, top=0, right=0, bottom=0)
         return {"score": 9, "has_text": bool(expected_text), "text_errors": [], "text_legible": True,
-                "text_in_safe_area": True, "character_issues": [], "anatomy_issues": [],
+                "text_in_safe_area": True, "text_bounds": bounds, "character_issues": [], "anatomy_issues": [],
                 "composition_issues": [], "style_issues": [], "fix": ""}
 
 

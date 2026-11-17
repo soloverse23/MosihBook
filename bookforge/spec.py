@@ -214,6 +214,11 @@ class ImageSettings(BaseModel):
 QUALITY_COST_USD = {"low": 0.01, "medium": 0.05, "high": 0.21}
 
 
+# fields that direct the pictures or the software, not words printed in the book
+_NOT_PRINTED = {"images", "style", "lettering", "prompt", "cover_prompt", "description", "palette", "sections",
+                "language", "type", "trim", "paper", "layout", "text_position", "illustration", "kind", "characters"}
+
+
 class Book(BaseModel):
     title: str
     subtitle: Optional[str] = None
@@ -237,6 +242,27 @@ class Book(BaseModel):
     sections: list[dict] = []
     images: ImageSettings = ImageSettings()
     words: BookWords = BookWords()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _punctuation(cls, data):
+        """Every printed word follows the language's punctuation (see words.punctuate). Picture directions are
+        left as written. A new structure is returned: the dict that was passed in is never changed."""
+        if not isinstance(data, dict):
+            return data
+        lang = data.get("language") or "English"
+
+        def walk(v, key=""):
+            if key in _NOT_PRINTED:
+                return v
+            if isinstance(v, str):
+                return _words.punctuate(v, lang)
+            if isinstance(v, dict):
+                return {k: walk(x, k) for k, x in v.items()}
+            if isinstance(v, list):
+                return [walk(x, key) for x in v]
+            return v
+        return walk(data)
 
     @field_validator("language", mode="before")
     @classmethod

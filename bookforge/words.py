@@ -84,6 +84,24 @@ def word(book, key: str, **fill) -> str:
     return text.format(**fill) if fill else text
 
 
+# punctuation every printed word gets, in every language: an ellipsis has 3 dots, never 4 (5 or more dots are
+# left alone: they are lines to write on); in French also the curly apostrophe ’ and « » quotes
+_FOUR_DOTS = re.compile(r"(?<!\.)\.{4}(?!\.)|…\.(?!\.)|(?<!\.)\.…")
+_APOSTROPHE = re.compile(r"(?<=[^\W\d_])'")
+_QUOTES = re.compile(r'"([^"\n]+)"|“([^”\n]+)”')
+
+
+def punctuate(text: str, language: str | None) -> str:
+    """The book's own punctuation rules applied to a printed string (page words, titles, lettering)."""
+    if not text:
+        return text
+    text = _FOUR_DOTS.sub(lambda m: "…" if "…" in m.group() else "...", text)
+    if canonical(language) == "French":
+        text = _APOSTROPHE.sub("’", text)
+        text = _QUOTES.sub(lambda m: f"« {(m.group(1) or m.group(2)).strip()} »", text)
+    return text
+
+
 # French puts a thin no-break space before ! ? ; : » and after «, so the mark never starts a line
 _FR_BEFORE = re.compile(r"[   ]+([!?;:»])")
 _FR_AFTER = re.compile(r"«[   ]+")

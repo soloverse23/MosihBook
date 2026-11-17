@@ -194,12 +194,26 @@ def _swap(node, word: re.Pattern, new: str):
     return node, 0
 
 
+def _contains(node, s: str) -> bool:
+    if isinstance(node, str):
+        return s in node
+    if isinstance(node, dict):
+        return any(_contains(v, s) for v in node.values())
+    if isinstance(node, list):
+        return any(_contains(v, s) for v in node)
+    return False
+
+
 def direct(data: dict, issue: dict) -> dict | None:
     """Swap the exact words on the issue's own page (or outside the pages for page 0) without asking Claude.
     None when the words are not found there, so Claude makes the fix instead."""
     cur, new = issue.get("current") or "", issue.get("replace_with") or ""
     if not cur.strip() or not new.strip() or cur == new:
         return None
+    # the check reads the printed words (’ « »); book.yaml may still hold the straight ' and " they come from
+    straight = cur.replace("’", "'")
+    if straight != cur and not _contains(data, cur) and _contains(data, straight):
+        cur = straight
     word = re.compile(rf"(?<!\w){re.escape(cur)}(?!\w)")
     out = dict(data)
     page = issue.get("page") or 0

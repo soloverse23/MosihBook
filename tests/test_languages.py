@@ -59,7 +59,7 @@ def test_the_end_is_lettered_in_the_book_language(language):
 
 def test_own_words_win():
     data = example("picture-book", language="French", words={"the_end": "Fin de l'histoire"})
-    assert words.word(spec.Book.model_validate(data), "the_end") == "Fin de l'histoire"
+    assert words.word(spec.Book.model_validate(data), "the_end") == "Fin de l’histoire"  # printed with the French apostrophe
     assert words.word(spec.Book.model_validate(data), "name") == "Prénom"
 
 
@@ -92,3 +92,17 @@ def test_translation_keeps_placeholders_and_own_words():
     assert texts["words.the_end"] == "The very end"
     assert translate.check(texts, {**texts, "words.copyright": "© {author}"}) == ["words.copyright: keep {year} exactly as it is"]
     assert translate.apply(data, {"words.the_end": "La toute fin"})["words"]["the_end"] == "La toute fin"
+
+
+def test_french_punctuation_in_print():
+    data = example("picture-book", language="French")
+    data["title"] = "L'été...."
+    data["pages"][0]["text"] = 'Il dit "oui".... Écris : ..........'
+    data["pages"][0]["prompt"] = "Pip's \"hat\" ...."
+    b = spec.Book.model_validate(data)
+    assert b.title == "L’été..."
+    assert b.pages[0].text == "Il dit « oui »... Écris : .........."   # 5+ dots are a line to write on
+    assert b.pages[0].prompt == "Pip's \"hat\" ...."                      # picture directions stay as written
+    assert data["title"] == "L'été...."                                 # the yaml itself is not touched
+    en = spec.Book.model_validate(example("picture-book", title="Pip's hat...."))
+    assert en.title == "Pip's hat..."

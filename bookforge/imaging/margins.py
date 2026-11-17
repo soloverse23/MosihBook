@@ -17,7 +17,7 @@ import re
 import shutil
 from pathlib import Path
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 from .. import kdp
 from ..project import Project
@@ -122,3 +122,86 @@ def draft(project: Project, slot_id: str) -> Path | None:
     out.parent.mkdir(exist_ok=True)
     canvas.save(out, "PNG")
     return out
+
+
+# --- the first drawing: a layout guide, so the words land inside the margin from the start -------------------
+
+GUIDE_ROLE = ("page layout guide, not a picture. Its gray hatched band (around the edge, and down the middle of a "
+              "two-page spread, where the book folds) marks where the page is trimmed or folded: every letter and "
+              "every face goes in the plain light area. Paint the illustration over the whole image, edge to edge, "
+              "the band included, as ordinary scenery with no words, faces or important details in it. Never draw "
+              "the gray, the hatching, a frame or a border.")
+GUIDE_NOTE = ("Every letter, and every face, stays inside the plain light area of the page layout guide (Image 1), "
+              "never in its gray hatched band: the page is trimmed there and words near the edge get cut.")
+GUIDE_KINDS = {"full_bleed", "opener", "split", "spot", "spread", "cover", "back"}
+
+
+def _pages(project: Project) -> int:
+    if project.manifest.exists():
+        return json.loads(project.manifest.read_text()).get("pages", kdp.MIN_PAGES)
+    return kdp.MIN_PAGES
+
+
+def live_rects(project: Project, slot) -> list[tuple[float, float, float, float]]:
+    """Where the words of a lettered picture may sit, as (left, top, right, bottom) fractions of the picture
+    (top-left origin): 9.7 mm (kdp.SAFE) plus ART_PAD inside every trim edge and fold, bleed included. Two areas
+    on a spread, one either side of the fold; none for a picture that is not lettered or not printed full size."""
+    if not slot.lettering or slot.kind not in GUIDE_KINDS:
+        return []
+    tw, th = project.book.trim_size
+    pad = kdp.SAFE + kdp.ART_PAD
+    H = th + 2 * kdp.BLEED
+    y0, y1 = (kdp.BLEED + pad) / H, 1 - (kdp.BLEED + pad) / H
+    if slot.kind in ("cover", "back"):  # front: fold on the left, bleed on the right; back: the other way
+        W = tw + kdp.BLEED
+        x0, x1 = (pad, tw - pad) if slot.kind == "cover" else (kdp.BLEED + pad, W - pad)
+        return [(x0 / W, y0, x1 / W, y1)]
+    interior = kdp.Interior(tw, th, _pages(project))
+    if slot.kind == "spread":
+        W, pw = interior.spread_w, interior.page_w
+        fold = interior.gutter + kdp.ART_PAD
+        return [((kdp.BLEED + pad) / W, y0, (pw - fold) / W, y1), ((pw + fold) / W, y0, 1 - (kdp.BLEED + pad) / W, y1)]
+    x, y, w, h = interior.art_live_box()  # vertically symmetric, so its bottom-left origin reads the same
+    return [(x / interior.page_w, y / interior.page_h, (x + w) / interior.page_w, (y + h) / interior.page_h)]
+
+
+def guide(project: Project, slot) -> Path | None:
+    """A page-shaped image of the live area: plain light paper inside, a gray hatched band where no letter may go.
+    None for a slot that needs none."""
+    rects = live_rects(project, slot)
+    if not rects:
+        return None
+    W = 1024 if slot.aspect >= 1 else round(1024 * slot.aspect)
+    H = round(W / slot.aspect)
+    band = Image.new("RGB", (W, H), (158, 158, 158))
+    d = ImageDraw.Draw(band)
+    for k in range(-H, W, 22):
+        d.line([(k, H), (k + H, 0)], fill=(128, 128, 128), width=5)
+    for x0, y0, x1, y1 in rects:
+        d.rectangle([round(x0 * W), round(y0 * H), round(x1 * W) - 1, round(y1 * H) - 1], fill=(246, 242, 233))
+    out = project.build / "margin-guides" / f"{slot.id}.png"
+    out.parent.mkdir(exist_ok=True)
+    band.save(out, "PNG")
+    return out
+
+
+def safe_area_brief(rects: list[tuple[float, float, float, float]]) -> str:
+    """The live area in words, for the art review."""
+    def one(r):
+        return (f"from {r[0]:.1%} to {r[2]:.1%} of the width (left to right) and from {r[1]:.1%} to {r[3]:.1%} of "
+                "the height (top to bottom)")
+    return ("SAFE AREA (the page's 9.7 mm margin): every letter, with its glow or shadow, must sit inside "
+            + " or ".join(one(r) for r in rects) + ". Anything closer to an edge"
+            + (" or to the fold in the middle" if len(rects) > 1 else "") + " gets cut.")
+
+
+def letters_inside(verdict: dict, rects: list[tuple[float, float, float, float]]) -> bool:
+    """Do the measured bounds of the lettering fit in the live area? (True when nothing was measured.)"""
+    b = verdict.get("text_bounds")
+    if not rects or not b or not verdict.get("has_text", True):
+        return True
+    if len(rects) > 1:  # a spread: words on each side, so only the outer edges are checked here
+        return b["left"] >= rects[0][0] and b["right"] <= rects[-1][2] and b["top"] >= rects[0][1] \
+            and b["bottom"] <= rects[0][3]
+    x0, y0, x1, y1 = rects[0]
+    return b["left"] >= x0 and b["top"] >= y0 and b["right"] <= x1 and b["bottom"] <= y1

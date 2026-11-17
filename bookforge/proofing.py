@@ -15,7 +15,8 @@ Check in every language:
 - grammar: a missing or doubled word, a wrong preposition, a sentence with no verb or cut off, a wrong pronoun;
 - punctuation: a sentence without its final mark, a missing comma that changes the meaning, quotes or brackets
   that are opened and never closed, a dialogue whose quotes are mixed up;
-- capitals at the start of each sentence and on names, and nowhere else by mistake."""
+- capitals at the start of each sentence and on names, and nowhere else by mistake;
+- an ellipsis has exactly 3 dots (... or …), never 4 or 2."""
 
 LANGUAGE = {
     "French": """\
@@ -39,7 +40,8 @@ French, check all of these:
   purpose;
 - typography: a space before ; : ! ? and » and after « (the layout makes those spaces non-breaking itself: report
   only a MISSING space, as in « Bonjour! », never ask for a non-breaking one); French quotes « » rather than " ";
-  the curly apostrophe ’ or the straight ' used the same way throughout; « … » for an ellipsis, never 4 dots;
+  the apostrophe is always the curly French one ’ (the printed book turns a straight ' into ’ by itself, so do
+  not report a straight ' alone); an ellipsis has exactly 3 dots, never 4;
   a dash — to open each line of dialogue when the book does that; no space before a comma or a full stop;
   ordinals 1er / 1re / 2e / 3e (never 2ème, 2nd for deuxième is fine only as « second »); capitals only on the
   first word of a title, as French titles do, unless it is a name;

@@ -171,7 +171,11 @@ def with_refs(prompt: str, refs: list[Ref], note: str | None = None, fix: str | 
     if refs:
         head.append("ATTACHED IMAGES:")
         head += [f"- Image {i}: {r.role}" for i, r in enumerate(refs, 1)]
-        if refs[0].role.startswith("layout draft"):  # a margin redraw (imaging.margins)
+        if refs[0].role.startswith("page layout guide"):  # the margin guide of a first drawing (imaging.margins)
+            head.append("Create a brand-new illustration of the scene below, with its words placed as Image 1 "
+                        "shows. Do not copy the other reference images' poses, backgrounds or layouts - only what "
+                        "each one is attached for.")
+        elif refs[0].role.startswith("layout draft"):  # a margin redraw (imaging.margins)
             head.append("Draw the scene below laid out exactly like Image 1. Do not copy the other reference "
                         "images' poses, backgrounds or layouts - only what each one is attached for.")
         else:

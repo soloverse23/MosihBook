@@ -92,8 +92,8 @@ Hard rules for book.yaml:
     pages or observation).
   Other kinds are illustrated pages as described in the structure.
 - Language: `language` is the book's language ({languages}). Every word a reader sees is written in it, natively
-  and with its own typography (accents and diacritics always, e.g. Romanian ș ț with a comma below; French
-  « guillemets »; German „Anführungszeichen“; Spanish ¡ ¿): title, subtitle, page `text`, `chapter` titles,
+  and with its own typography (an ellipsis always 3 dots, never 4; accents and diacritics always, e.g. Romanian ș ț with a comma below; French
+  « guillemets » and the curly apostrophe ’ (l’été, qu’il, aujourd’hui); German „Anführungszeichen“; Spanish ¡ ¿): title, subtitle, page `text`, `chapter` titles,
   exercise and game headings (never an English "Your turn!" in a French book), game data, certificate, blurb,
   dedication, about_author, copyright. Image `prompt`s, `style`, `lettering` and character descriptions stay
   in English. Character names stay as the brief gives them.

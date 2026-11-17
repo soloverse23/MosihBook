@@ -110,6 +110,11 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
         if (d := (drafts or {}).get(slot.id)) and slot.id in bump:
             refs = [prompting.Ref(d, margins.DRAFT_ROLE)] + refs[:MAX_REFS - 1]
             note = " ".join(x for x in (note, margins.MARGIN_NOTE) if x)
+        elif g := margins.guide(project, slot):
+            # lettered art is drawn over a guide of the 9.7 mm margin, so its words land inside it the first time
+            refs = [prompting.Ref(g, margins.GUIDE_ROLE)] + refs[:MAX_REFS - 1]
+            note = " ".join(x for x in (note, margins.GUIDE_NOTE) if x)
+        rects = margins.live_rects(project, slot)
         size = provider.request_size(slot.aspect)
         quality = settings.quality_for(slot.id)
         # the default quality keeps the old cache keys, so switching it never re-buys existing art
@@ -144,7 +149,11 @@ def run(project: Project, only: set[str] | None = None, bump: set[str] = frozens
             finds.save()
         best = reviews.data.get(key, {}).get("verdict")
         if best is None and reviewer:
-            best = reviewer.review(cached, prompt, refs, slot.expected_text)
+            best = reviewer.review(cached, prompt, refs, slot.expected_text,
+                                   margins.safe_area_brief(rects) if rects else "")
+            # the measured letters are checked against the page's exact margin, not only the reviewer's yes/no
+            if not margins.letters_inside(best, rects):
+                best["text_in_safe_area"] = False
             reviews.data[key] = {"slot": slot.id, "verdict": best}
         shutil.copyfile(cached, project.art_path(slot.id))
         if slot.id not in (drafts or {}):  # a margin redraw keeps the first original for the next draft
