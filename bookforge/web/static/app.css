@@ -949,3 +949,37 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 @media (prefers-color-scheme: dark) { .ctl-load { background: rgb(0 0 0 / .55); } }
 @media (max-width: 640px) { .ctl-page { grid-template-columns: 1fr; } .ctl-img { max-width: 220px; } }
 .ctl-pick { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--ink-2); }
+
+/* ---- the book's activity panel: every job running, waiting and lately finished, above each step ---- */
+.book-main { min-width: 0; }
+.acts { display: grid; gap: var(--s2); margin-bottom: var(--s5); }
+.acts-h { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); min-height: 28px; }
+.acts-l { display: grid; gap: var(--s2); }
+.job-ico { width: 18px; flex: none; display: grid; place-items: center; }
+.job-ico svg { width: 16px; height: 16px; }
+.job.is-queued .job-ico { color: var(--ink-3); }
+.job.is-done .job-ico { color: var(--ok); }
+.job.is-failed .job-ico { color: var(--err); }
+.job.is-running { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+.job.is-queued .progress, .job.is-queued .logbox { display: none; }
+.job.is-queued .job-h { background: var(--sunk); }
+.job.is-done .job-h, .job.is-failed .job-h { padding-block: var(--s2); }
+.job.is-done .progress { height: 3px; }
+.job-x { flex: none; }
+.job-stages { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 var(--s4) var(--s3); padding: 0; font-size: 12px; }
+.job-stages li { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; background: var(--sunk); color: var(--ink-3); }
+.job-stages li.now { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.job-stages li.done { color: var(--ink-2); }
+.job-stages li svg { width: 12px; height: 12px; color: var(--ok); }
+/* a running bar keeps moving even while one long step (laying out the pages) has no finer progress */
+.progress.live > i { background: linear-gradient(90deg, transparent 0, rgb(255 255 255 / .35) 50%, transparent 100%) var(--accent);
+  background-size: 200% 100%; animation: sk 1.4s linear infinite; }
+.gal-t { position: relative; }
+.gal-busy { position: absolute; top: 8px; right: 8px; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--bg); color: var(--accent); box-shadow: 0 1px 3px rgb(0 0 0 / .2); }
+.gal-busy.queued { color: var(--ink-3); }
+.gal-busy svg { width: 13px; height: 13px; }
+.gal-busy .spin { width: 11px; height: 11px; }
+.ctl-state svg { width: 14px; height: 14px; flex: none; }
+.ctl-how { border-top: 1px solid var(--line); padding-block: var(--s2); }
+.ctl-issue .note { margin: 0; }

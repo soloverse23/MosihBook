@@ -44,7 +44,7 @@ def client(tmp_path, monkeypatch):
 def _wait(client, job_id):
     for _ in range(300):
         j = client.get(f"/api/jobs/{job_id}").json()
-        if j["status"] != "running":
+        if j["status"] not in ("running", "queued"):
             return j
         time.sleep(0.2)
     raise TimeoutError
@@ -249,7 +249,7 @@ def test_job_reports_each_image_live(client):
     assert client.get(f"/api/books/{slug}").json()["job_kind"] in ("mock", None)  # refresh can find the job
     for _ in range(300):
         j = client.get(f"/api/jobs/{job}").json()
-        if j["status"] != "running":
+        if j["status"] not in ("running", "queued"):
             break
         time.sleep(0.1)
     pg = j["progress"]
@@ -402,16 +402,81 @@ def test_control_and_correction(client, monkeypatch):
     text_issue = rep["issues"][0]
     text_issue.update(fix="text", slot=None, book_page=2, book_pages=[2], status="open")
     control.report_path(pr).write_text(json.dumps(rep))
-    c = client.post(f"/api/books/{slug}/control/{text_issue['id']}/apply", json={"prompt": "Fix the spelling."})
-    assert c.status_code == 502 and "no change" in c.json()["detail"]
-    assert "page 2 of the `pages:` list in book.yaml" in seen[0] and "page 6 of the printed PDF" in seen[0]
-    assert client.get(f"/api/books/{slug}/control").json()["report"]["issues"][0]["status"] == "open"
+    def settle():
+        for _ in range(300):
+            js = client.get(f"/api/books/{slug}/jobs").json()["jobs"]
+            if not any(j["status"] in ("running", "queued") for j in js):
+                return js
+            time.sleep(0.1)
+        raise TimeoutError
 
-    # a real change is written to book.yaml, the issue is applied and the book is flagged for a rebuild
+    # the fix is queued with a rebuild after it; one that changes nothing leaves the issue open, saying why
+    c = client.post(f"/api/books/{slug}/control/{text_issue['id']}/apply", json={"prompt": "Fix the spelling."})
+    assert c.status_code == 200 and len(c.json()["jobs"]) == 1
+    js = settle()
+    assert [j["kind"] for j in js][:2] == ["build", "text"] and js[1]["status"] == "failed"
+    assert "page 2 of the `pages:` list in book.yaml" in seen[0] and "page 6 of the printed PDF" in seen[0]
+    got = client.get(f"/api/books/{slug}/control").json()["report"]["issues"][0]
+    assert got["status"] == "open" and "no change" in got["error"] and got["job"] is None
+
+    # a real change is written to book.yaml, the issue is applied and the book is built again
     async def revise_ok(yaml_text, instruction):
         return yaml_text.replace("title: ", "title: Fixed ", 1)
     monkeypatch.setattr(author, "revise", revise_ok)
-    c = client.post(f"/api/books/{slug}/control/{text_issue['id']}/apply", json={"prompt": "Fix the spelling."})
-    assert c.status_code == 200 and c.json() == {"yaml": True}
+    c = client.post(f"/api/books/{slug}/control/apply", json={"items": [{"id": text_issue["id"], "prompt": "Fix the spelling."}]})
+    assert c.status_code == 200
+    js = settle()
+    # the rebuild ran after the fix (it fails here only because the test book has placeholder art)
+    assert js[0]["kind"] == "build" and js[0]["started"] >= js[1]["ended"] and js[1]["status"] == "done"
     rep = client.get(f"/api/books/{slug}/control").json()["report"]
-    assert rep["issues"][0]["status"] == "applied" and rep["rebuild"] is True
+    assert rep["issues"][0]["status"] == "applied" and "error" not in rep["issues"][0]
+
+
+def test_book_queue_merges_redraws_and_runs_words_beside_pictures(client, monkeypatch):
+    """Nothing is refused while something runs: it waits. Redraws waiting merge into one job, word fixes run
+    on their own lane beside the pictures, and a build waits for everything before it."""
+    import threading
+
+    from bookforge.web import jobs
+    gates: dict[str, threading.Event] = {}
+    order: list[str] = []
+
+    def fake_run(job):
+        order.append(job.kind)
+        gates.setdefault(job.id, threading.Event()).wait(5)
+        job.status, job.ended = "done", time.time()
+        with jobs._lock:
+            jobs.QUEUE[(job.user, job.slug)].remove(job)
+            jobs._pump((job.user, job.slug))
+    monkeypatch.setattr(jobs, "_run", fake_run)
+    slug = "queue-test"
+    art = jobs.start(slug, "art")
+    with pytest.raises(RuntimeError):
+        jobs.start(slug, "art")                      # the same drawing twice is refused, nothing else
+    a = jobs.start(slug, "regen", slots=["p001"], note="smaller fox", then_build=True)
+    b = jobs.start(slug, "margins", slots=["p002"])
+    c = jobs.start(slug, "regen", slots=["p001"], note="facing left")
+    assert a is b is c and a.status == "queued" and a.slots == ["p001", "p002"]
+    assert a.redraw["p001"] == "smaller fox Also: facing left" and a.fit == ["p002"]
+    t = jobs.start(slug, "text", texts=[{"issue": "c001", "prompt": "x", "page": 3}])
+    q = jobs.QUEUE[(None, slug)]
+    assert [j.kind for j in q] == ["art", "regen", "text", "build"]
+    assert t.status == "running" and art.status == "running"   # words go ahead beside the pictures
+    gates.setdefault(t.id, threading.Event()).set()
+    gates.setdefault(art.id, threading.Event()).set()
+    for _ in range(50):
+        if a.status == "running":
+            break
+        time.sleep(0.02)
+    assert a.status == "running" and q[-1].status == "queued"   # the build waits for the redraw
+    gates.setdefault(a.id, threading.Event()).set()
+    for _ in range(50):
+        if q and q[-1].status == "running":
+            break
+        time.sleep(0.02)
+    gates.setdefault(q[-1].id, threading.Event()).set()
+    for _ in range(50):
+        if not q:
+            break
+        time.sleep(0.02)
+    assert order == ["art", "text", "regen", "build"] and not q

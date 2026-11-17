@@ -159,7 +159,7 @@ def update_status(force: bool = False):
 
 @app.post("/api/update/apply")
 def update_apply():
-    if any(j.status == "running" for j in jobs.JOBS.values()):
+    if jobs.busy():
         raise HTTPException(409, "Wait for the pictures or layout that are being made to finish, then update")
     try:
         return {"ok": True, "version": updater.apply()}
@@ -513,19 +513,30 @@ def set_high(slug: str, body: dict = Body(...)):
 
 @app.post("/api/books/{slug}/jobs/{kind}")
 def start_job(slug: str, kind: str, body: dict = Body(default={})):
+    """Queue work for the book. It starts at once when nothing is in its way, else it waits its turn."""
     d = _dir(slug)
     if not (d / "book.yaml").exists():
         raise HTTPException(400, "write the manuscript first")
-    if kind != "mock" and not settings.load().openai_api_key:
+    if kind not in ("mock", "build", "check") and not settings.load().openai_api_key:
         raise HTTPException(400, "add your OpenAI API key in Settings first")
+    if kind == "text":
+        raise HTTPException(400, "word fixes are made from Control & correction")
     try:
         job = jobs.start(slug, kind, slots=body.get("slots"), note=body.get("note"),
-                         pilot_pages=int(body.get("pages", 3)), force=bool(body.get("force")))
+                         pilot_pages=int(body.get("pages", 3)), force=bool(body.get("force")),
+                         then_build=bool(body.get("then_build")))
     except (ValueError, RuntimeError) as e:
         raise HTTPException(409, str(e))
     if kind in ("pilot", "art"):
         state.save_state(slug, step="art")
     return {"job": job.id}
+
+
+@app.get("/api/books/{slug}/jobs")
+def book_jobs(slug: str):
+    """What is running and waiting for the book, in order, and what finished lately."""
+    _dir(slug)
+    return {"jobs": jobs.book_jobs(slug)}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -536,14 +547,27 @@ def get_job(job_id: str, since: int = 0):
     return job.view(since)
 
 
+@app.delete("/api/jobs/{job_id}")
+def cancel_job(job_id: str):
+    """Take a job that is still waiting out of the queue (one that runs cannot be stopped halfway)."""
+    if not jobs.cancel(job_id):
+        raise HTTPException(409, "only a job that is still waiting can be removed")
+    return {"ok": True}
+
+
 @app.get("/api/books/{slug}/control")
 def control_report(slug: str):
     """The last control & correction report of the built book (null before the first check)."""
     d = _dir(slug)
     try:
-        return {"report": control.view(Project(d / "book.yaml"))}
+        report = control.view(Project(d / "book.yaml"))
     except Exception as e:
         raise HTTPException(422, f"book.yaml is not valid: {e}")
+    if report:   # the fixes waiting or being made
+        busy = jobs.issue_jobs(slug)
+        for i in report["issues"]:
+            i["job"] = busy.get(i["id"])
+    return {"report": report}
 
 
 @app.post("/api/books/{slug}/control/check")
@@ -569,44 +593,75 @@ def control_issue(slug: str, issue_id: str, body: dict = Body(...)):
     return {"ok": True}
 
 
-@app.post("/api/books/{slug}/control/{issue_id}/apply")
-async def control_apply(slug: str, issue_id: str, body: dict = Body(default={})):
-    """Do the fix. A picture is redrawn with the prompt as its note (starts a job); a text or layout fix
-    rewrites book.yaml with Claude. Either way the book must be built again to show it."""
+def _checking(slug: str) -> bool:
+    return any(j["kind"] == "check" and j["status"] in jobs.ACTIVE for j in jobs.book_jobs(slug))
+
+
+def _queue_fixes(slug: str, items: list[dict]) -> list[str]:
+    """Queue the fixes of a control report: the pictures in one redraw job (drawn at the same time), the words
+    in one job beside it (made one after another), then one rebuild of the book."""
     d = _dir(slug)
     p = Project(d / "book.yaml")
-    issue = next((i for i in (control.load(p) or {"issues": []})["issues"] if i["id"] == issue_id), None)
-    if not issue:
-        raise HTTPException(404)
-    prompt = (body.get("prompt") or issue["prompt"]).strip()
-    if not prompt:
-        raise HTTPException(400, "write the fix first")
-    # a redraw asked only to keep things inside the margin keeps the picture and fits it there instead
-    if issue["fix"] == "image" and margins.is_margin_request(prompt) and not issue.get("replace_with"):
-        issue["fix"] = "margin"
-    if issue["fix"] == "margin":
-        if not settings.load().openai_api_key:
-            raise HTTPException(400, "add your OpenAI API key in Settings first")
-        try:
-            job = jobs.start(slug, "margins", slots=[issue["slot"]])
-        except (ValueError, RuntimeError) as e:
-            raise HTTPException(409, str(e))
-        control.set_status(p, issue_id, "applied", prompt)
-        return {"job": job.id, "slot": issue["slot"]}
-    if issue["fix"] == "image":
-        if not settings.load().openai_api_key:
-            raise HTTPException(400, "add your OpenAI API key in Settings first")
-        try:
-            job = jobs.start(slug, "regen", slots=[issue["slot"]], note=prompt)
-        except (ValueError, RuntimeError) as e:
-            raise HTTPException(409, str(e))
-        control.set_status(p, issue_id, "applied", prompt)
-        return {"job": job.id, "slot": issue["slot"]}
-    current = state.read_yaml(slug)
-    text = await _claude(control.apply_text(current, issue, prompt))
-    state.write_yaml(slug, text)
-    control.set_status(p, issue_id, "applied", prompt)
-    return {"yaml": True}
+    if _checking(slug):
+        raise HTTPException(409, "the pages are being read again - wait for the new list of problems")
+    report = control.load(p) or {"issues": []}
+    by_id = {i["id"]: i for i in report["issues"]}
+    redraw, notes, fit, texts = {}, {}, {}, []
+    for it in items:
+        issue = by_id.get(it.get("id"))
+        if not issue:
+            raise HTTPException(404, f"no problem {it.get('id')!r}: check the book again")
+        prompt = (it.get("prompt") or issue["prompt"]).strip()
+        if not prompt:
+            raise HTTPException(400, "write the fix first")
+        # a redraw asked only to keep things inside the margin keeps the picture and fits it there instead
+        fix = "margin" if issue["fix"] == "image" and margins.is_margin_request(prompt) and not issue.get("replace_with") \
+            else issue["fix"]
+        control.set_status(p, issue["id"], "open", prompt, error="")
+        if fix == "margin":
+            fit[issue["id"]] = issue["slot"]
+        elif fix == "image":
+            redraw[issue["id"]] = issue["slot"]
+            notes[issue["slot"]] = jobs._join(notes.get(issue["slot"]), prompt)
+        else:
+            texts.append({"issue": issue["id"], "prompt": prompt, "page": issue["page"]})
+    if (redraw or fit) and not settings.load().openai_api_key:
+        raise HTTPException(400, "add your OpenAI API key in Settings first")
+    out = []
+    try:
+        if redraw:
+            out.append(jobs.start(slug, "regen", slots=list(dict.fromkeys(redraw.values())), notes=notes,
+                                  issues=redraw).id)
+        if fit:
+            out.append(jobs.start(slug, "margins", slots=list(dict.fromkeys(fit.values())), issues=fit).id)
+        if texts:
+            out.append(jobs.start(slug, "text", texts=texts).id)
+        if out:
+            jobs.ensure_build(slug)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(409, str(e))
+    return list(dict.fromkeys(out))
+
+
+@app.post("/api/books/{slug}/control/{issue_id}/apply")
+def control_apply(slug: str, issue_id: str, body: dict = Body(default={})):
+    """Queue the fix. A picture is redrawn with the prompt as its note; a text or layout fix rewrites
+    book.yaml with Claude. Either way the book is built again afterwards to show it."""
+    return {"jobs": _queue_fixes(slug, [{"id": issue_id, "prompt": body.get("prompt")}])}
+
+
+@app.post("/api/books/{slug}/control/apply")
+def control_apply_many(slug: str, body: dict = Body(...)):
+    """Queue several fixes at once: [{id, prompt}]."""
+    return {"jobs": _queue_fixes(slug, body.get("items") or [])}
+
+
+@app.delete("/api/books/{slug}/control/{issue_id}/queue")
+def control_unqueue(slug: str, issue_id: str):
+    """Take a fix that has not started out of the queue."""
+    if not jobs.drop_issue(slug, issue_id):
+        raise HTTPException(409, "this fix has already started")
+    return {"ok": True}
 
 
 @app.get("/api/books/{slug}/proofs")

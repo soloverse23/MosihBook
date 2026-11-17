@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from .spec import Book, plain
 BATCH = 5          # pages shown to Claude per call
 PARALLEL = 3       # calls in flight at once
 FIXES = ("image", "margin", "text", "layout")
+_lock = threading.Lock()   # fixes running side by side each update the one report file
 
 SYSTEM = """\
 You are the proofreader and print controller of a children's book that is about to be published.
@@ -195,8 +197,9 @@ def _normalise(issue: dict, info: dict) -> dict:
             "book_page": p.get("book_page"), "book_pages": p.get("book_pages") or []}
 
 
-async def inspect(project: Project) -> dict:
-    """Read every page of the built book and write build/control.json."""
+async def inspect(project: Project, progress=None) -> dict:
+    """Read every page of the built book and write build/control.json. `progress(done, total)` is called as
+    each group of pages has been read."""
     if not project.manifest.exists() or not any(project.proofs.glob("page-*.png")):
         raise FileNotFoundError("build the book first")
     info = page_info(project)
@@ -205,11 +208,21 @@ async def inspect(project: Project) -> dict:
     # what the writer already ignored stays ignored: it is kept in the report and never raised again
     ignored = [i for i in (load(project) or {"issues": []})["issues"] if i.get("status") == "ignored"]
 
-    async def one(chunk):
-        async with sem:
-            return await _check_batch(project, chunk, info, str(project.book.language), ignored)
+    chunks = [nums[i:i + BATCH] for i in range(0, len(nums), BATCH)]
+    read = 0
 
-    found = await asyncio.gather(*(one(nums[i:i + BATCH]) for i in range(0, len(nums), BATCH)))
+    async def one(chunk):
+        nonlocal read
+        async with sem:
+            out = await _check_batch(project, chunk, info, str(project.book.language), ignored)
+        read += 1
+        if progress:
+            progress(read, len(chunks))
+        return out
+
+    if progress:
+        progress(0, len(chunks))
+    found = await asyncio.gather(*(one(c) for c in chunks))
     fresh = [_normalise(i, info) for batch in found for i in batch]
     fresh = [i for i in fresh if not any(_same(i, g) for g in ignored)]
     issues = sorted(fresh + ignored, key=lambda i: i["page"])
@@ -217,20 +230,29 @@ async def inspect(project: Project) -> dict:
         i["id"] = f"c{k:03d}"
         i.setdefault("status", "open")        # open | applied | ignored
     report = {"checked": time.time(), "pages": len(nums), "issues": issues}
-    report_path(project).write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    with _lock:
+        report_path(project).write_text(json.dumps(report, indent=2, ensure_ascii=False))
     return report
 
 
-def set_status(project: Project, issue_id: str, status: str, prompt: str | None = None) -> dict:
-    report = load(project) or {"issues": []}
-    issue = next((i for i in report["issues"] if i["id"] == issue_id), None)
-    if not issue:
-        raise KeyError(issue_id)
-    issue["status"] = status
-    if prompt:
-        issue["prompt"] = prompt
-    report_path(project).write_text(json.dumps(report, indent=2, ensure_ascii=False))
-    return issue
+def set_status(project: Project, issue_id: str, status: str, prompt: str | None = None,
+               error: str | None = None) -> dict:
+    """Change one issue. `error` says why its fix could not be made ("" clears it)."""
+    with _lock:
+        report = load(project) or {"issues": []}
+        issue = next((i for i in report["issues"] if i["id"] == issue_id), None)
+        if not issue:
+            raise KeyError(issue_id)
+        issue["status"] = status
+        if prompt:
+            issue["prompt"] = prompt
+        if error is not None:
+            if error:
+                issue["error"] = error
+            else:
+                issue.pop("error", None)
+        report_path(project).write_text(json.dumps(report, indent=2, ensure_ascii=False))
+        return issue
 
 
 def view(project: Project) -> dict | None:

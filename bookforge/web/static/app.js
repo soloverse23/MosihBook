@@ -22,6 +22,7 @@ const ICONS = {
   compass: '<circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/>',
   settings: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   alert: '<path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17.2v.1"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.1"/>',
@@ -278,102 +279,239 @@ document.addEventListener("keydown", (e) => {
   dictation.rec.stop();
 }, true);
 
-// ---------- jobs ----------
+// ---------- jobs: the book's activity panel ----------
+// The server keeps one queue per book (web/jobs.py): nothing is refused while something runs, it waits its turn.
+// Pictures are drawn on one lane and word fixes made by Claude on another, so both go ahead at the same time;
+// a build waits until everything before it is done. This panel sits above every step of the book and shows
+// all of it from the server, so switching steps or pages never loses track of a job.
 function logLine(s) {
   const cls = /^(ERROR|FAILED|NEEDS ATTENTION)/.test(s) ? "e" : /^WARN/.test(s) ? "w" : /PASS/.test(s) ? "g" : "";
   return `<span class="${cls}">${esc(s)}</span>\n`;
 }
 
-function jobPanel(title) {
-  return `<div class="job" id="job" hidden>
-    <div class="job-h"><span class="spin" id="job-spin"></span>
-      <div class="job-tt"><div class="t" id="job-t">${esc(title)}</div><div class="faint small" id="job-sub"></div></div>
-      <div class="job-n num" id="job-n"></div></div>
-    <div class="progress indet" id="job-p"><i></i></div>
-    <div class="job-live" id="job-live" hidden><div class="review" id="job-grid"></div></div>
-    <details class="logbox" id="job-d"><summary>Show log</summary><pre class="log" id="job-log"></pre></details></div>`;
-}
-
 const dur = (sec) => sec < 60 ? `${Math.max(1, Math.round(sec))}s` : sec < 3600 ? `${Math.round(sec / 60)} min` : `${(sec / 3600).toFixed(1)} h`;
 // a note or problem that is only about the page edge (the studio's languages)
 const MARGIN_MSG = /margin|marge|\brand\b|safe.?(area|zone)|bleed|trim|edge|too close|cut off|حاشیه|مارجین|لبه|کناره|بریده|برش/i;
+const ACTIVE = new Set(["queued", "running"]);
+const BUILD_KINDS = new Set(["build", "mock", "check"]);
+const isActive = (j) => ACTIVE.has(j.status);
+const names = (ids, max = 4) => {
+  const n = ids.map((id) => slotName({ id }));
+  return n.length > max ? `${n.slice(0, max).join(", ")} and ${n.length - max} more` : n.join(", ");
+};
+
+// what a job does, in words: "Redrawing Page 4 and Page 7 (inside the margin)"
+function jobTitle(j) {
+  const slots = [...new Set([...j.redraw, ...j.fit])];
+  switch (j.kind) {
+    case "art": return "Drawing the illustrations";
+    case "pilot": return `Drawing the pilot: characters, cover and the first ${j.pilot_pages} page${j.pilot_pages > 1 ? "s" : ""}`;
+    case "build": return "Building the print files";
+    case "mock": return "Building a preview with placeholder pictures";
+    case "check": return "Claude is checking every page";
+    case "text": {
+      const pages = [...new Set(j.texts.map((t) => t.page))].sort((a, b) => a - b);
+      return `Fixing the words · ${j.texts.length} fix${j.texts.length > 1 ? "es" : ""} on page${pages.length > 1 ? "s" : ""} ${pages.join(", ")}`;
+    }
+    default: {
+      if (!slots.length) return "Redrawing pictures";
+      const how = !j.redraw.length ? " inside the margin" : "";
+      return slots.length > 1 ? `Redrawing ${slots.length} pictures${how} · ${names(slots)}` : `Redrawing ${names(slots)}${how}`;
+    }
+  }
+}
+// kept for the few places that only know the kind
 const JOB_LABELS = { mock: "Building preview", pilot: "Generating pilot", art: "Generating art",
-  regen: "Redrawing image", build: "Building print files", margins: "Redrawing pictures inside the margin" };
+  regen: "Redrawing image", build: "Building print files", margins: "Redrawing pictures inside the margin", text: "Fixing the words", check: "Checking every page" };
 
 // one tile in the live grid: a finished image, a failed one, or one being drawn right now
 function liveTile(slug, id, im) {
   if (!im) return `<div class="shot drawing" data-tile="${esc(id)}"><div class="img"><div class="sk"></div><span class="spin"></span></div>
-    <div class="m"><div class="row between"><span class="tag">${esc(id)}</span><span class="faint xs">drawing…</span></div></div></div>`;
+    <div class="m"><div class="row between"><span class="tag">${esc(slotName({ id }))}</span><span class="faint xs">drawing…</span></div></div></div>`;
   const badge = im.failed ? `<span class="badge err">failed</span>`
     : /no cost/.test(im.result) ? `<span class="badge plain">already had</span>` : `<span class="badge ok">done</span>`;
   const src = `/api/books/${slug}/build/thumbs/${id}.jpg?${Math.round(im.t)}`;
   return `<div class="shot landed ${im.failed ? "bad" : ""}" data-tile="${esc(id)}"><div class="img">${im.failed ? icon("alert")
       : `<img src="${src}" data-full="/api/books/${slug}/build/art/${id}.png?${Math.round(im.t)}" alt="${esc(id)}">`}</div>
-    <div class="m"><div class="row between"><span class="tag">${esc(id)}</span>${badge}</div></div></div>`;
+    <div class="m"><div class="row between"><span class="tag">${esc(slotName({ id }))}</span>${badge}</div></div></div>`;
 }
 
-// Follow a job until it ends. Works the same for a job just started and one picked up again after a
-// page refresh: everything shown comes from the server. total = expected image count if the server doesn't say.
-async function watchJob(id, title, total = 0) {
-  const box = $("#job"), pre = $("#job-log"), bar = $("#job-p"), n = $("#job-n"), sub = $("#job-sub");
-  const live = $("#job-live"), grid = $("#job-grid");
-  box.hidden = false; pre.innerHTML = ""; grid.innerHTML = ""; $("#job-t").textContent = title; $("#job-spin").hidden = false;
-  bar.className = "progress indet"; bar.firstElementChild.style.width = "";
-  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  const base = title.replace(/…$/, "");
-  let since = 0, failures = 0;
-  for (;;) {
-    let j;
-    try { j = await api("GET", `/api/jobs/${id}?since=${since}`); }
-    catch (e) {
-      // the server restarted (jobs live in its memory) or the network dropped
-      if (/404|Not Found/i.test(e.message)) { $("#job-spin").hidden = true; sub.textContent = "This job is gone: the server was restarted. Images finished before that are saved; run it again to continue."; bar.className = "progress failed"; return { status: "failed", result: {} }; }
-      if (++failures > 20) throw e;
-      sub.textContent = "Connection lost, retrying…"; await new Promise((r) => setTimeout(r, 2000)); continue;
-    }
-    failures = 0;
-    if (j.lines.length) { pre.insertAdjacentHTML("beforeend", j.lines.map(logLine).join("")); pre.scrollTop = pre.scrollHeight; }
-    since = j.next;
-    const pg = j.progress, tot = pg.total || total, done = pg.done;
-    const elapsed = (j.ended || j.now) - j.started;
-    if (tot) {
-      const pct = Math.min(100, Math.round((done / tot) * 100));
-      bar.className = "progress"; bar.firstElementChild.style.width = `${Math.max(pct, 2)}%`;
-      n.innerHTML = `<b>${pct}%</b><span class="faint"> · ${done} of ${tot}</span>`;
-      // only count images actually drawn this run for the time estimate (cached ones are instant)
-      const drawn = pg.images.filter((x) => !/no cost/.test(x.result));
-      const left = tot - done;
-      // images per second so far already includes the parallel workers
-      const eta = drawn.length >= 2 && left > 0 ? left / (drawn.length / elapsed) : null;
-      sub.textContent = [pg.phase, pg.active.length ? `drawing ${pg.active.join(", ")}` : "", `${dur(elapsed)} elapsed`,
-        eta ? `about ${dur(eta)} left` : left ? "estimating time left…" : ""].filter(Boolean).join(" · ");
-    } else {
-      sub.textContent = `${dur(elapsed)} elapsed`;
-    }
-    // live grid: finished images appear as they land; the ones being drawn show as placeholders
-    if (pg.images.length || pg.active.length) {
-      live.hidden = false;
-      const want = [...pg.images.map((x) => x.id), ...pg.active.filter((a) => !pg.images.some((x) => x.id === a))];
-      const byId = Object.fromEntries(pg.images.map((x) => [x.id, x]));
-      for (const sid of want) {
-        const el = grid.querySelector(`[data-tile="${CSS.escape(sid)}"]`);
-        const landed = !!byId[sid];
-        if (el && (el.classList.contains("landed") || !landed)) continue;
-        const html = liveTile(j.slug, sid, byId[sid]);
-        if (el) el.outerHTML = html; else grid.insertAdjacentHTML("beforeend", html);
-      }
-      $$("[data-tile]", grid).forEach((el) => { if (!want.includes(el.dataset.tile)) el.remove(); });
-    }
-    if (j.status !== "running") {
-      $("#job-spin").hidden = true;
-      bar.className = `progress ${j.status === "done" ? "done" : "failed"}`; bar.firstElementChild.style.width = "100%";
-      $("#job-t").textContent = j.status === "done" ? `${base}: done` : `${base}: failed`;
-      sub.textContent = `${j.status === "done" ? "Finished" : "Stopped"} in ${dur(elapsed)}` + (tot ? ` · ${done} of ${tot} images` : "");
-      if (j.status !== "done") $("#job-d").open = true;
-      return j;
-    }
-    await new Promise((r) => setTimeout(r, 1500));
+const Activity = { slug: null, el: null, jobs: [], prev: null, subs: new Set(), timer: null, logs: new Map(), dismissed: new Set() };
+
+// show the activity of this book in el (called on every render of the book page)
+function activityFor(slug, el) {
+  if (Activity.slug !== slug) {
+    Object.assign(Activity, { slug, jobs: [], prev: null, logs: new Map() });
+    try { Activity.dismissed = new Set(JSON.parse(sessionStorage.getItem(`dismissed:${slug}`) || "[]")); } catch { Activity.dismissed = new Set(); }
   }
+  Activity.el = el;
+  Activity.subs.clear();   // the steps subscribe again on each render
+  renderActivity();
+  kickJobs();
+}
+const activeJobs = () => Activity.jobs.filter(isActive);
+// fn(jobs, finished) runs after every poll while host is on screen; finished = the jobs that ended since the last one
+function onJobs(host, fn) {
+  const sub = (...a) => { if (!host.isConnected) return Activity.subs.delete(sub); fn(...a); };
+  Activity.subs.add(sub);
+}
+function kickJobs(delay = 0) {
+  clearTimeout(Activity.timer);
+  Activity.timer = setTimeout(pollJobs, delay);
+}
+async function pollJobs() {
+  const slug = Activity.slug;
+  if (!slug || !Activity.el?.isConnected) { Activity.slug = null; return; }   // left the book
+  let list;
+  try { list = (await api("GET", `/api/books/${slug}/jobs`)).jobs; }
+  catch { return kickJobs(5000); }
+  if (slug !== Activity.slug) return;
+  const before = Activity.prev;
+  const finished = before ? list.filter((j) => !isActive(j) && before.get(j.id) && ACTIVE.has(before.get(j.id))) : [];
+  // a job gone from the list while it was active (cancelled) also counts as a change
+  const changed = !before || list.length !== before.size || list.some((j) => before.get(j.id) !== j.status);
+  Activity.jobs = list;
+  Activity.prev = new Map(list.map((j) => [j.id, j.status]));
+  renderActivity();
+  for (const j of finished) {
+    if (j.status === "done") toast(`${jobTitle(j)}: done`);
+    else toast(`${jobTitle(j)}: ${j.error || "stopped"}`, true);
+  }
+  [...Activity.subs].forEach((fn) => { try { fn(list, finished, changed); } catch (e) { console.error(e); } });
+  kickJobs(list.some(isActive) ? 1500 : 8000);
+}
+
+function jobSub(j) {
+  const pg = j.progress;
+  if (j.status === "queued") {
+    const first = Activity.jobs.find((x) => x.id === j.waits_for?.[0]);
+    if (BUILD_KINDS.has(j.kind)) return "Waiting · starts when everything above is finished";
+    return first ? `Waiting · starts when “${jobTitle(first)}” is finished` : "Waiting to start…";
+  }
+  const elapsed = ((j.ended || j.now) - (j.started || j.created));
+  if (j.status === "done") {
+    const imgs = pg.total ? ` · ${pg.done} of ${pg.total} picture${pg.total > 1 ? "s" : ""}` : "";
+    const att = Object.keys(j.failures || {}).length;
+    return `Finished in ${dur(elapsed)}${imgs}${att ? ` · ${att} need${att > 1 ? "" : "s"} attention, see the log` : ""}${j.error ? ` · ${j.error}` : ""}`;
+  }
+  if (j.status === "failed") return j.error || "Stopped. See the log.";
+  const stage = pg.stages.find((s) => s.key === pg.stage);
+  const idx = pg.stages.findIndex((s) => s.key === pg.stage);
+  const parts = [stage ? (pg.stages.length > 1 ? `Step ${idx + 1} of ${pg.stages.length}: ${stage.label}` : stage.label) : "Starting…"];
+  if (pg.note) parts.push(pg.note);
+  if (pg.stage === "draw" && pg.active.length) parts.push(`drawing ${names(pg.active, 3)}`);
+  parts.push(`${dur(elapsed)} elapsed`);
+  // only images really drawn count for the time left (ones already there are instant)
+  if (pg.stage === "draw" && pg.total) {
+    const drawn = pg.images.filter((x) => !/no cost/.test(x.result)).length, left = pg.total - pg.done;
+    const since = (j.now - j.started);
+    if (drawn >= 2 && left > 0) parts.push(`about ${dur(left / (drawn / since))} left`);
+    else if (left > 0) parts.push("estimating time left…");
+  }
+  return parts.join(" · ");
+}
+
+function jobCard(j) {
+  return `<div class="job" data-job="${j.id}">
+    <div class="job-h"><span class="job-ico"></span>
+      <div class="job-tt"><div class="t"></div><div class="faint small job-sub"></div></div>
+      <div class="job-n num"></div><span class="job-x"></span></div>
+    <div class="progress"><i></i></div>
+    <ol class="job-stages"></ol>
+    <div class="job-live" hidden><div class="review job-grid"></div></div>
+    <details class="logbox"><summary>Show log</summary><pre class="log"></pre></details></div>`;
+}
+
+function updateCard(el, j) {
+  const pg = j.progress, st = j.status;
+  el.className = `job is-${st}`;
+  $(".job-ico", el).innerHTML = st === "running" ? `<span class="spin"></span>` : icon({ queued: "clock", done: "check", failed: "alert" }[st] || "info");
+  $(".t", el).textContent = jobTitle(j);
+  $(".job-sub", el).textContent = jobSub(j);
+  const pct = st === "done" ? 100 : st === "queued" ? 0 : pg.pct;
+  $(".job-n", el).innerHTML = st === "running" ? `<b>${pct}%</b>${pg.stage === "draw" && pg.total ? `<span class="faint"> · ${pg.done} of ${pg.total}</span>` : ""}`
+    : st === "queued" ? `<span class="badge plain">Waiting</span>` : st === "done" ? `<span class="badge ok">Done</span>` : `<span class="badge err">Failed</span>`;
+  $(".job-x", el).innerHTML = st === "queued" ? `<button class="btn sm ghost" data-jcancel="${j.id}" title="Take it out of the queue">Remove</button>`
+    : st !== "running" ? `<button class="btn sm icon ghost" data-jdismiss="${j.id}" aria-label="Hide">${icon("x")}</button>` : "";
+  const bar = $(".progress", el);
+  bar.className = `progress ${st === "done" ? "done" : st === "failed" ? "failed" : st === "running" ? "live" : "idle"}`;
+  bar.firstElementChild.style.width = `${st === "failed" ? 100 : Math.max(pct, st === "running" ? 3 : 0)}%`;
+  // the steps of a job with more than one (draw → lay out → cover…)
+  const stages = $(".job-stages", el);
+  stages.hidden = !(pg.stages.length > 1 && st === "running");
+  if (!stages.hidden) stages.innerHTML = pg.stages.map((s) => `<li class="${s.done ? "done" : s.key === pg.stage ? "now" : ""}">${s.done ? icon("check") : ""}${esc(s.label)}</li>`).join("");
+  // live grid: finished images appear as they land; the ones being drawn show as placeholders
+  const live = $(".job-live", el), grid = $(".job-grid", el);
+  const want = [...pg.images.map((x) => x.id), ...pg.active.filter((a) => !pg.images.some((x) => x.id === a))];
+  live.hidden = !want.length || (st !== "running" && want.length > 12);
+  if (!live.hidden) {
+    const byId = Object.fromEntries(pg.images.map((x) => [x.id, x]));
+    for (const sid of want) {
+      const t = grid.querySelector(`[data-tile="${CSS.escape(sid)}"]`);
+      const landed = !!byId[sid];
+      if (t && (t.classList.contains("landed") || !landed)) continue;
+      const html = liveTile(j.slug, sid, byId[sid]);
+      if (t) t.outerHTML = html; else grid.insertAdjacentHTML("beforeend", html);
+    }
+    $$("[data-tile]", grid).forEach((t) => { if (!want.includes(t.dataset.tile)) t.remove(); });
+  }
+  const d = $("details", el);
+  if (st === "failed" && !el.dataset.opened) { el.dataset.opened = "1"; d.open = true; }
+  if (d.open) loadLog(j.id, $("pre", d), j.log_n);
+}
+
+async function loadLog(id, pre, n) {
+  const have = Activity.logs.get(id) || { lines: [], busy: false };
+  Activity.logs.set(id, have);
+  if (have.busy) return;
+  if (have.lines.length < n) {
+    have.busy = true;
+    try { const r = await api("GET", `/api/jobs/${id}?since=${have.lines.length}`); have.lines.push(...r.lines); } catch { /* gone */ }
+    have.busy = false;
+  }
+  if (pre.childElementCount !== have.lines.length) { pre.innerHTML = have.lines.map(logLine).join(""); pre.scrollTop = pre.scrollHeight; }
+}
+
+function renderActivity() {
+  const el = Activity.el;
+  if (!el?.isConnected) return;
+  const list = Activity.jobs.filter((j) => isActive(j) || !Activity.dismissed.has(j.id));
+  el.hidden = !list.length;
+  if (!list.length) { el.innerHTML = ""; return; }
+  if (!$(".acts-h", el)) {
+    el.innerHTML = `<div class="acts-h"></div><div class="acts-l"></div>`;
+    el.addEventListener("click", async (e) => {
+      const c = e.target.closest("[data-jcancel]"), x = e.target.closest("[data-jdismiss]"), all = e.target.closest("[data-jclear]");
+      if (c) { c.disabled = true; try { await api("DELETE", `/api/jobs/${c.dataset.jcancel}`); } catch (err) { toast(err.message, true); } kickJobs(); }
+      if (x || all) {
+        (x ? [x.dataset.jdismiss] : Activity.jobs.filter((j) => !isActive(j)).map((j) => j.id)).forEach((id) => Activity.dismissed.add(id));
+        try { sessionStorage.setItem(`dismissed:${Activity.slug}`, JSON.stringify([...Activity.dismissed])); } catch {}
+        renderActivity();
+      }
+    });
+    el.addEventListener("toggle", (e) => {
+      const card = e.target.closest?.("[data-job]");
+      const j = card && Activity.jobs.find((x) => x.id === card.dataset.job);
+      if (j && e.target.open) loadLog(j.id, $("pre", e.target), j.log_n);
+    }, true);
+  }
+  const run = list.filter((j) => j.status === "running"), wait = list.filter((j) => j.status === "queued"), ended = list.filter((j) => !isActive(j));
+  const lanes = new Set(run.map((j) => (j.kind === "text" ? "text" : "main")));
+  const why = lanes.size > 1 ? "Pictures and word fixes are going ahead at the same time."
+    : wait.some((j) => BUILD_KINDS.has(j.kind)) ? "The book is built again once everything above it is finished." : "";
+  $(".acts-h", el).innerHTML = `<div class="row gap2"><b>${run.length || wait.length ? "In progress" : "Finished"}</b>
+      <span class="faint small">${[run.length ? `${run.length} running` : "", wait.length ? `${wait.length} waiting` : ""].filter(Boolean).join(" · ")}${why ? ` · ${why}` : ""}</span></div>
+    ${ended.length ? `<button class="btn sm ghost" data-jclear>Hide finished</button>` : ""}`;
+  const box = $(".acts-l", el);
+  // running first, then waiting in queue order, then the finished ones
+  const order = [...run, ...wait, ...ended];
+  order.forEach((j, i) => {
+    let card = box.querySelector(`[data-job="${j.id}"]`);
+    if (!card) { box.insertAdjacentHTML("beforeend", jobCard(j)); card = box.lastElementChild; }
+    if (box.children[i] !== card) box.insertBefore(card, box.children[i]);
+    updateCard(card, j);
+  });
+  $$("[data-job]", box).forEach((c) => { if (!order.some((j) => j.id === c.dataset.job)) c.remove(); });
 }
 
 let settingsCache = null;
@@ -1195,7 +1333,8 @@ async function bookView(slug, step) {
         const cls = i === idx ? "current" : i <= reached ? "done" : i > reached + 1 ? "locked" : "";
         return `<li><a class="${cls}" href="#/book/${slug}/${k}"><span class="dot">${cls === "done" ? icon("check") : i + 1}</span>${label}</a></li>`;
       }).join("")}</ol>
-      <section id="step"></section></div></div>`;
+      <div class="book-main"><div class="acts" id="activity" hidden aria-live="polite"></div><section id="step"></section></div></div></div>`;
+  activityFor(slug, $("#activity"));
   const pop = $("#more-pop");
   $("#more").onclick = (e) => { e.stopPropagation(); pop.hidden = !pop.hidden; };
   document.addEventListener("click", () => (pop.hidden = true), { once: true });
@@ -1204,11 +1343,6 @@ async function bookView(slug, step) {
     if (!(await modal({ title: "Delete this book?", body: `“${esc(b.title)}” and all its files, art and builds will be removed. This can't be undone.`, confirm: "Delete", danger: true }))) return;
     await api("DELETE", `/api/books/${slug}`); toast("Book deleted"); location.hash = "#/";
   };
-  if (b.job) {
-    const where = "art";
-    if (step !== where) $("#step").insertAdjacentHTML("beforebegin", `<div class="job-banner">${note("info",
-      `<span class="spin"></span> ${esc(JOB_LABELS[b.job_kind] || "A job")} is running in the background. <a href="#/book/${slug}/${where}">Watch progress</a>`)}</div>`);
-  }
   const steps = { brief: stepBrief, questions: stepQuestions, outline: stepOutline, manuscript: stepManuscript,
     art: stepArt, control: stepControl, publish: stepPublish };
   await steps[step]($("#step"), b, slug);
@@ -1520,6 +1654,7 @@ function artGallery(el, slug, ctx, { slots, filters = true, title = "Illustratio
   const full = (s) => `/api/books/${slug}/build/art/${s.id}.png?${ctx.v}`;
   const tile = (s) => `<button type="button" class="gal-t ${state(s)} ${s.id === sel ? "on" : ""}" data-sel="${esc(s.id)}" title="${esc(slotName(s))}">
       <span class="gal-i">${s.has_art ? `<img src="${thumb(s)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${full(s)}'">` : icon("image")}</span>
+      ${ctx.slotBusy?.(s.id) ? `<span class="gal-busy ${ctx.slotBusy(s.id)}" title="${ctx.slotBusy(s.id) === "drawing" ? "Being redrawn now" : "Waiting to be redrawn"}">${ctx.slotBusy(s.id) === "drawing" ? `<span class="spin"></span>` : icon("clock")}</span>` : ""}
       <span class="gal-n">${state(s) === "bad" ? `<i class="dot err"></i>` : ""}${esc(slotName(s))}${s.quality === "high" ? `<em>HQ</em>` : ""}</span></button>`;
   const group = (name, list) => list.length ? `<div class="gal-g"><div class="gal-h">${name}<span class="faint">${list.length}</span></div>
       <div class="gal-grid">${list.map(tile).join("")}</div></div>` : "";
@@ -1536,7 +1671,9 @@ function artGallery(el, slug, ctx, { slots, filters = true, title = "Illustratio
       ${iss.length ? `<div data-ignorable>${note("err", `<b>${iss.length === 1 ? "Needs a fix" : `${iss.length} things to fix`}</b><ul>${iss.map((x) => `<li>${esc(x)} ${ignoreBtn(slug, `art|${s.id}|${x}`)}</li>`).join("")}</ul>`)}</div>` : ""}
       <label class="insp-q"><span><b class="small">High quality</b><span class="faint xs">~${money(ctx.p.high_cost_usd)} instead of ~${money(ctx.p.base_cost_usd)}${s.has_art ? ", applies on the next redraw" : ""}</span></span>
         <span class="switch"><input type="checkbox" data-high="${esc(s.id)}" ${s.quality === "high" ? "checked" : ""} aria-label="High quality for ${esc(slotName(s))}"><i></i></span></label>
-      ${s.has_art ? `<button class="btn" data-redo="${esc(s.id)}">${icon("refresh")}Redo this image</button>`
+      ${ctx.slotBusy?.(s.id) === "drawing" ? `<div class="ctl-state"><span class="spin"></span>Being redrawn now. The new picture shows here when it is ready; progress is at the top.</div>`
+        : ctx.slotBusy?.(s.id) === "queued" ? `<div class="ctl-state">${icon("clock")}Waiting to be redrawn: it starts when the work before it is done.</div>`
+        : s.has_art ? `<button class="btn" data-redo="${esc(s.id)}">${icon("refresh")}Redo this image</button>`
         : `<p class="faint xs">Drawn by Generate all art, ~${money(s.cost_usd)}.</p>`}</div>`;
   };
   const draw = () => {
@@ -1568,16 +1705,28 @@ function artGallery(el, slug, ctx, { slots, filters = true, title = "Illustratio
     // an ignored problem may leave the image clean: redraw once the global Ignore handler has run
     $$("[data-ignore]", el).forEach((b) => b.addEventListener("click", () => setTimeout(draw)));
   };
-  if (!slots.length) { el.hidden = true; return; }
+  if (!slots.length) { el.hidden = true; return draw; }
   el.hidden = false;
   draw();
+  return draw;
 }
 
 async function stepArt(host, b, slug) {
   let p = await loadPlan(slug);
   if (p.error) { host.innerHTML = stepHead("Art & build", "") + note("err", `${esc(p.error)}<br><a href="#/book/${slug}/manuscript">Fix the manuscript</a>`); return; }
   const ctx = { p, review: new Map(), v: Date.now(), setPlan: (np) => { p = ctx.p = np; $$(".est").forEach((e) => (e.textContent = money(np.estimate_usd))); drawSteps(); } };
-  let built = b.last_build, preflight = null, running = false, tab = null, pilotN = 3;
+  let built = b.last_build, preflight = null, tab = null, pilotN = 3;
+  // what the book's queue is doing right now (see the activity panel): drawing everything, building, and which
+  // pictures are being redrawn or wait for it
+  const busyNow = () => {
+    const act = activeJobs(), slots = new Map();
+    for (const j of act) {
+      if (j.kind === "regen" || j.kind === "margins") [...j.redraw, ...j.fit].forEach((id) => slots.set(id, j.status === "running" ? "drawing" : "queued"));
+      if (j.kind === "art" || j.kind === "pilot") j.progress.active.forEach((id) => slots.set(id, "drawing"));
+    }
+    return { drawing: act.find((j) => j.kind === "art" || j.kind === "pilot"), building: act.find((j) => BUILD_KINDS.has(j.kind)), slots };
+  };
+  ctx.slotBusy = (id) => busyNow().slots.get(id);
   const chars = () => p.slots.filter((s) => s.kind === "character").length;
   const done = () => p.slots.filter((s) => s.has_art).length;
   const missing = () => p.slots.filter((s) => !s.has_art);
@@ -1592,7 +1741,6 @@ async function stepArt(host, b, slug) {
     <div class="stack">
       <ol class="artflow" id="flow" role="tablist" aria-label="Art steps"></ol>
       ${lintHtml(slug, p.lint)}
-      ${jobPanel("Working…")}
       <div class="stack" id="panel"></div>
     </div>`;
 
@@ -1618,7 +1766,7 @@ async function stepArt(host, b, slug) {
 
   function drawPanel() {
     const panel = $("#panel");
-    const left = missing().length;
+    const left = missing().length, bz = busyNow();
     if (tab === "art") {
       const pct = Math.round((done() / p.slots.length) * 100);
       // optional: try the look on a few pages before paying for the rest (only worth it while pages are missing)
@@ -1631,39 +1779,45 @@ async function stepArt(host, b, slug) {
       panel.innerHTML = actionCard(left ? "Draw the illustrations" : "Every illustration is drawn",
         `${left ? `${left} image${left > 1 ? "s" : ""} left, about <b>${money(missingCost())}</b>. ` : ""}All at <b>${esc(p.quality)}</b> quality (~${money(p.base_cost_usd)} each). Each image is generated once and only redrawn when you press Redo.
          <span class="act-p"><span class="progress ${left ? "" : "done"}"><i style="width:${Math.max(pct, 2)}%"></i></span><span class="num small">${done()} / ${p.slots.length}</span></span>`,
-        left ? `<button class="btn primary" id="all">${icon("sparkle")}Generate ${left === p.slots.length ? "all art" : `${left} missing`}</button>`
-          : next("build", "Next: print files"), pilot) + `
+        bz.drawing ? `<button class="btn primary" disabled><span class="spin"></span>Drawing… progress is at the top</button>`
+          : left ? `<button class="btn primary" id="all">${icon("sparkle")}Generate ${left === p.slots.length ? "all art" : `${left} missing`}</button>`
+          : next("build", "Next: print files"), bz.drawing ? "" : pilot) + `
         <div class="card gallery" id="gal"></div>
         ${structureCard(p.structure, slug)}`;
-      if (pilot) {
+      if (pilot && !bz.drawing) {
         $("#pp").oninput = (e) => { pilotN = Math.max(1, Math.min(10, +e.target.value || 1)); $("#pp-cost").textContent = `~${money(pilotCost())}`; };
         $("#pilot").onclick = async (e) => {
           const btn = e.currentTarget;
           if (await cost("Try the look first?", `Character sheets, the front cover and the first ${pilotN} page${pilotN > 1 ? "s" : ""}: about <b>${money(pilotCost())}</b>.`))
-            run(btn, "pilot", { pages: pilotN }, "Generating pilot…", chars() + 1 + pilotN);
+            run(btn, "pilot", { pages: pilotN });
         };
       }
-      artGallery($("#gal"), slug, ctx, { slots: p.slots.map((s) => ({ ...s })), title: "Illustrations",
+      ctx.galDraw = artGallery($("#gal"), slug, ctx, { slots: p.slots.map((s) => ({ ...s })), title: "Illustrations",
         sub: `Click an image to inspect it. Switch on <b>High quality</b> for images that deserve it. <span class="faint">${esc(p.model)}</span>` });
       $("#all")?.addEventListener("click", async (e) => {
         const btn = e.currentTarget;
         if (await cost("Generate all illustrations?", `${left} missing image${left > 1 ? "s" : ""}, about <b>${money(missingCost())}</b>.`))
-          run(btn, "art", {}, "Generating art…", p.slots.length);
+          run(btn, "art", {});
       });
     } else {
       panel.innerHTML = (left ? note("info", `Building needs every illustration. ${left} still missing. <a href="#" data-go="art">Go to illustrations</a>`) : "") +
         actionCard("Build the print files",
           `Lays out interior.pdf and cover.pdf with the real art and checks them against KDP's rules (trim, bleed, margins, fonts, cover size).
            ${built === "mock" ? `<br><span class="faint">The last build used placeholder art.</span>` : ""}`,
-          `<button class="btn ${built === "real" ? "" : "primary"}" id="build" ${left ? "disabled" : ""}>${icon("file")}${built === "real" ? "Build again" : "Build &amp; preflight"}</button>
+          (bz.building ? `<button class="btn" disabled><span class="spin"></span>${bz.building.status === "queued" ? "Build waiting in the queue" : "Building… progress is at the top"}</button>`
+            : `<button class="btn ${built === "real" ? "" : "primary"}" id="build" ${left ? "disabled" : ""}>${icon("file")}${built === "real" ? "Build again" : "Build &amp; preflight"}</button>`) + `
            ${built === "real" && preflight?.ok ? `<a class="btn primary" href="#/book/${slug}/control">Next: control &amp; correction${icon("arrow")}</a>` : ""}`) + `
         <div id="pf"></div><div id="viewer"></div>`;
       if (preflight && built === "real") showPreflight(preflight);
       if (built === "real") spreadViewer($("#viewer"), slug);
-      $("#build").onclick = (e) => run(e.currentTarget, "build", {}, "Building print files…", 0);
+      $("#build")?.addEventListener("click", (e) => run(e.currentTarget, "build", {}));
     }
     $$("[data-go]", panel).forEach((a) => (a.onclick = (e) => { e.preventDefault(); show(a.dataset.go); }));
-    if (running) jobButtons().forEach((x) => (x.disabled = true));
+    // a preflight problem whose picture is already being redrawn says so instead of offering it again
+    $$("[data-pfredo], [data-pffit]", panel).forEach((btn) => {
+      const st = ctx.slotBusy(btn.dataset.pfredo || btn.dataset.pffit);
+      if (st) { btn.disabled = true; btn.innerHTML = st === "drawing" ? `<span class="spin"></span>Being redrawn` : `${icon("clock")}Waiting to be redrawn`; }
+    });
   }
 
   const showPreflight = (r) => {
@@ -1712,29 +1866,13 @@ async function stepArt(host, b, slug) {
     await loadReview();
   };
 
-  const jobButtons = () => [...["#pilot", "#all", "#build", "#pp", "#pf-fit-all"].map((q) => $(q)).filter(Boolean), ...$$("[data-redo], [data-pfredo], [data-pffit]")];
-  const follow = async (job, kind, label, total) => {
-    running = true; jobButtons().forEach((x) => (x.disabled = true));
-    try {
-      const j = await watchJob(job, label, total);
-      if (j.status !== "done") toast("The job stopped. See the log.", true);
-      if ((kind === "build" || kind === "margins") && j.status === "done") built = "real";
-      if (j.result?.preflight) preflight = j.result.preflight;
-      // reload the plan so the new images show; retry once, since a failed reload would leave the old picture
-      for (let i = 0; i < 3; i++) {
-        try { const np = await loadPlan(slug); if (np.error) throw new Error(np.error); p = ctx.p = np; await loadReview(); break; }
-        catch { await new Promise((r) => setTimeout(r, 800)); }
-      }
-      if (j.status === "done") toast(`${label.replace(/…$/, "")}: done`);
-      return j;
-    } finally {
-      running = false;
-      if (host.isConnected) { drawSteps(); drawPanel(); }
-    }
-  };
-  const run = async (btn, kind, body, label, total) => busy(btn, label, async () => {
-    const { job } = await api("POST", `/api/books/${slug}/jobs/${kind}`, { ...body, force: !activeLint(slug, p.lint).length });
-    return follow(job, kind, label, total);
+  // the work goes into the book's queue: it starts now or after what is already there (see the panel at the top)
+  const run = async (btn, kind, body) => busy(btn, "Adding…", async () => {
+    const ahead = activeJobs().length;
+    await api("POST", `/api/books/${slug}/jobs/${kind}`, { ...body, force: !activeLint(slug, p.lint).length });
+    if (ahead) toast("Added to the queue: it starts as soon as the work before it is done.");
+    kickJobs();
+    window.scrollTo({ top: 0, behavior: "smooth" });
   });
   const cost = (title, body) => modal({ title, body: `${body}<br><br>This uses the OpenAI image API and costs real money.`, confirm: "Generate" });
   const fitCost = (ids) => ids.reduce((a, id) => a + (p.slots.find((s) => s.id === id)?.cost_usd || p.base_cost_usd), 0);
@@ -1743,7 +1881,7 @@ async function stepArt(host, b, slug) {
     if (!confirmed && !(await modal({ title: ids.length > 1 ? `Redraw ${ids.length} pictures inside the margin?` : `Redraw ${slotName({ id: ids[0] })} inside the margin?`,
       body: `Each page is drawn again as one new picture, from its current picture: same scene, characters and words, laid out so everything sits inside the 9.7 mm margin. The new picture is checked again (spelling and margin). About ${money(fitCost(ids))}, then the book is built again.<br><br>This uses the OpenAI image API and costs real money.`,
       confirm: "Redraw" }))) return;
-    run(btn, "margins", { slots: ids }, ids.length > 1 ? "Redrawing pictures inside the margin…" : `Redrawing ${slotName({ id: ids[0] })} inside the margin…`, ids.length);
+    run(btn, "margins", { slots: ids, then_build: true });
   };
   ctx.redo = async (id, btn, prefill = "") => {
     const slot = p.slots.find((s) => s.id === id);
@@ -1757,20 +1895,38 @@ async function stepArt(host, b, slug) {
     if (!v) return;
     if (v.keep) return ctx.fit([id], btn, true);
     if (!!v.high !== isHigh) p = ctx.p = await api("PUT", `/api/books/${slug}/high`, { slots: [id], on: !!v.high });
-    run(btn, "regen", { slots: [id], note: (v.note || "").trim() || null }, `Redrawing ${slotName({ id })}…`, 1);
+    run(btn, "regen", { slots: [id], note: (v.note || "").trim() || null });
   };
 
   await Promise.all([loadReview(), built === "real" ? loadPreflight() : null]);
   if (!host.isConnected) return;
   // a job still running on the server (e.g. after a page refresh) opens the step it belongs to
-  tab = { pilot: "art", art: "art", regen: "art", build: "build", margins: "build" }[b.job_kind] || auto();
+  tab = { build: "build", margins: "build" }[b.job_kind] || auto();
   drawSteps(); drawPanel();
-  if (b.job) follow(b.job, b.job_kind, `${JOB_LABELS[b.job_kind] || "Working"}…`, 0);
+  // the queue changed: when a job ends, load the new pictures (and the new preflight after a build) and draw
+  // again; when one starts or waits, only the buttons and the gallery's "being redrawn" marks change
+  let sig = JSON.stringify([!!busyNow().drawing, busyNow().building?.status, [...busyNow().slots]]);
+  onJobs(host, async (list, finished) => {
+    const bz = busyNow(), now = JSON.stringify([!!bz.drawing, bz.building?.status, [...bz.slots]]);
+    if (finished.length) {
+      for (const j of finished) {
+        if (BUILD_KINDS.has(j.kind) && j.kind !== "check" && j.status === "done") { built = j.kind === "mock" ? "mock" : "real"; await loadPreflight(); }
+      }
+      for (let i = 0; i < 3; i++) {   // retry: a failed reload would leave the old picture on screen
+        try { const np = await loadPlan(slug); if (np.error) throw new Error(np.error); p = ctx.p = np; await loadReview(); break; }
+        catch { await new Promise((r) => setTimeout(r, 800)); }
+      }
+    } else if (now === sig) return;
+    sig = now;
+    if (host.isConnected) { drawSteps(); drawPanel(); }
+  });
 }
 
 // ---------- control & correction: Claude proofreads the built book, page by page ----------
 const FIX_LABEL = { image: "Redraw the picture", margin: "Redraw inside the margin", text: "Fix the words", layout: "Fix the page layout" };
 const PAID_FIX = new Set(["image", "margin"]);
+// how several fixes go ahead together (said in the confirm dialogs and above the list while they run)
+const HOW_FIXES = "How they run: all the pictures are redrawn together, at the same time. The word fixes are made by Claude one after another, alongside the pictures. When everything is done, the book is rebuilt once. You can leave this page meanwhile: progress stays at the top.";
 
 async function stepControl(host, b, slug) {
   const head = stepHead("Control & correction", "Claude reads every page of the built book, lists the real problems and writes the fix for each one.");
@@ -1779,43 +1935,51 @@ async function stepControl(host, b, slug) {
     return;
   }
   let report = (await api("GET", `/api/books/${slug}/control`)).report;
-  // The queue: fixes wait here and run one after another (a book runs one job at a time). When it empties the
-  // book is rebuilt and read again, because the check reads the built pages.
-  const queue = [];                 // [{ id, prompt }]
-  let working = null, phase = null; // phase: null | "fix" | "build" | "check"
-  let ver = 0;                      // bumped after each rebuild so the page pictures load fresh
-  // only the slim bar of actions stays pinned; the job's progress and log scroll away with the page
-  host.innerHTML = head + `<div class="stack">${jobPanel("Working…")}<div class="ctl-sticky"><div id="ctl-head"></div></div><div class="stack" id="ctl"></div></div>`;
+  // Fixes go into the book's queue on the server (see the panel at the top), so they keep going when you switch
+  // steps or pages. Pictures are redrawn together in one job, word fixes are made beside them, then the book is
+  // built once. Each issue says where its fix is: i.job = { status: queued | running } while it waits or runs.
+  let ver = 0;   // bumped after each rebuild so the page pictures load fresh
+  host.innerHTML = head + `<div class="stack"><div class="ctl-sticky"><div id="ctl-head"></div></div><div class="stack" id="ctl"></div></div>`;
   const png = (n) => `/api/books/${slug}/build/proofs/page-${String(n).padStart(3, "0")}.png`;
-  const stat = (id) => (working === id ? "working" : queue.some((q) => q.id === id) ? "queued" : null);
   const reload = async () => { report = (await api("GET", `/api/books/${slug}/control`)).report; };
-  const locked = () => phase === "build" || phase === "check";
   const live = () => host.isConnected;
+  const jobOf = (kinds) => activeJobs().find((j) => kinds.includes(j.kind));
+  const checking = () => jobOf(["check"]);
+  const building = () => jobOf(["build", "mock"]);
+  const stat = (i) => i.job?.status || null;   // "queued" | "running" | null
 
   function issueHtml(i) {
-    const s = stat(i.id);
+    const s = stat(i), locked = !!checking();
     let body;
     if (i.status === "applied") body = `<span class="badge ok">Fixed</span>`;
-    else if (s === "working") body = `<div class="ctl-state"><span class="spin"></span>Fixing…</div>`;
-    else if (s === "queued") body = `<div class="ctl-state">Waiting in the queue <button class="btn sm ghost" data-unq="${i.id}">Remove</button></div>`;
-    else body = `<label class="ctl-pick" ${report.issues.filter((x) => x.page === i.page && x.status !== "ignored").length > 1 ? "" : "hidden"}><input type="checkbox" data-pick="${i.id}" checked> Include in “Apply selected”</label>
+    else if (s === "running") body = `<div class="ctl-state"><span class="spin"></span>${PAID_FIX.has(i.fix) ? "Redrawing the picture now" : "Claude is fixing the words now"} · progress is at the top</div>`;
+    else if (s === "queued") body = `<div class="ctl-state">${icon("clock")}Waiting in the queue <button class="btn sm ghost" data-unq="${i.id}">Remove</button></div>`;
+    else body = `${i.error ? note("err", `<b>Not fixed:</b> ${esc(i.error)}`) : ""}
+      <label class="ctl-pick" ${report.issues.filter((x) => x.page === i.page && x.status === "open" && !x.job).length > 1 ? "" : "hidden"}><input type="checkbox" data-pick="${i.id}" checked> Include in “Apply selected”</label>
       <textarea class="input" rows="3" data-prompt="${i.id}" aria-label="The fix">${esc(i.prompt)}</textarea>
-      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}">${icon(PAID_FIX.has(i.fix) ? "sparkle" : "check")}Apply fix${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
-        <button class="btn sm ghost" data-skip="${i.id}" ${phase === "check" ? "disabled" : ""}>Ignore</button></div>`;
+      <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}" ${locked ? "disabled" : ""}>${icon(PAID_FIX.has(i.fix) ? "sparkle" : "check")}${i.error ? "Try again" : "Apply fix"}${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
+        <button class="btn sm ghost" data-skip="${i.id}" ${locked ? "disabled" : ""}>Ignore</button></div>`;
     return `<div class="ctl-issue ${i.status} ${s ? "is-" + s : ""}" id="iss-${i.id}">
-      <div class="row gap2"><span class="badge ${PAID_FIX.has(i.fix) ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span></div>
+      <div class="row gap2"><span class="badge ${PAID_FIX.has(i.fix) ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span>
+        ${i.slot ? `<span class="faint xs" title="The name of this picture in Art &amp; build and in the progress panel">picture: ${esc(slotName({ id: i.slot }))}</span>` : ""}</div>
       <p class="ctl-problem">${esc(i.problem)}</p>
       ${i.replace_with ? `<p class="ctl-swap">${i.current ? `<s>${esc(i.current)}</s> → ` : ""}<b>${esc(i.replace_with)}</b></p>` : ""}${body}</div>`;
   }
 
-  // only the issue (and its page) that changed is redrawn, so nothing else on the screen moves
+  // only the issue (and its page) that changed is redrawn, so nothing else on the screen moves (a fix being typed stays)
   function refreshIssue(id) {
     const el = $(`#iss-${id}`, host), i = report?.issues.find((x) => x.id === id);
     if (!el || !i) return;
-    el.outerHTML = issueHtml(i);
-    voiceify($(`#iss-${id}`, host));
-    const card = $(`#iss-${id}`, host).closest(".ctl-card");
-    card.classList.toggle("loading", !!card.querySelector(".is-working"));
+    const html = issueHtml(i);
+    if (el.dataset.html === html) return;
+    const typed = $(`[data-prompt="${id}"]`, el)?.value;
+    el.outerHTML = html;
+    const now = $(`#iss-${id}`, host);
+    now.dataset.html = html;
+    if (typed != null && $(`[data-prompt="${id}"]`, now)) $(`[data-prompt="${id}"]`, now).value = typed;
+    voiceify(now);
+    const card = now.closest(".ctl-card");
+    card.classList.toggle("loading", !!card.querySelector(".is-running"));
     refreshPage(card);
   }
   // the page's own button: apply the ticked fixes of that page at once (shown when it has two or more to do)
@@ -1824,40 +1988,44 @@ async function stepControl(host, b, slug) {
     if (!btn) return;
     const open = $$("[data-pick]", card), picked = open.filter((c) => c.checked).length;
     btn.hidden = open.length < 2;
-    btn.disabled = !picked;
+    btn.disabled = !picked || !!checking();
     btn.innerHTML = `${icon("sparkle")}Apply selected (${picked})`;
   }
   const refreshAll = () => report?.issues.forEach((i) => refreshIssue(i.id));
 
-  const todoList = () => (report?.issues || []).filter((i) => i.status === "open" && !stat(i.id));
+  const todoList = () => (report?.issues || []).filter((i) => i.status === "open" && !i.job);
 
   function drawHead() {
     const box = $("#ctl-head", host);
     if (!report) { box.innerHTML = ""; return; }
     const open = report.issues.filter((i) => i.status !== "ignored");
     const todo = open.filter((i) => i.status === "open").length;
-    const free = todoList().length, busyNow = phase || queue.length || working;
-    const line = phase === "build" ? `<span class="spin"></span>Rebuilding the book…`
-      : phase === "check" ? `<span class="spin"></span>Reading every page again…`
-      : busyNow ? `<span class="spin"></span>Fixing: ${queue.length + (working ? 1 : 0)} left`
+    const inQueue = open.filter((i) => i.job), running = inQueue.filter((i) => i.job.status === "running").length;
+    const free = todoList().length, chk = checking(), bld = building(), busyNow = !!(chk || bld || inQueue.length);
+    const line = chk ? `<span class="spin"></span>Claude is reading every page again…`
+      : inQueue.length ? `<span class="spin"></span>Fixing ${inQueue.length}: ${running} now, ${inQueue.length - running} waiting${bld ? " · then the book is rebuilt" : ""}`
+      : bld ? `<span class="spin"></span>${bld.status === "queued" ? "The book will be rebuilt" : "Rebuilding the book…"}`
       : open.length ? `<b>${todo} to fix</b>${open.length > todo ? ` · ${open.length - todo} fixed` : ""}` : `<b>No problems found</b>`;
     box.innerHTML = `<div class="card"><div class="card-b row between">
       <div class="row gap2">${line}<span class="faint small"> · ${report.pages} pages read</span></div>
       <div class="row gap2">
-        ${free > 1 ? `<button class="btn" id="ignore-all" ${phase === "check" ? "disabled" : ""}>Ignore all (${free})</button>` : ""}
-        ${free > 1 ? `<button class="btn primary" id="apply-all">${icon("sparkle")}Apply all (${free})</button>` : ""}
+        ${free > 1 ? `<button class="btn" id="ignore-all" ${chk ? "disabled" : ""}>Ignore all (${free})</button>` : ""}
+        ${free > 1 ? `<button class="btn primary" id="apply-all" ${chk ? "disabled" : ""}>${icon("sparkle")}Apply all (${free})</button>` : ""}
         ${report.rebuild && !busyNow ? `<button class="btn primary" id="rebuild">${icon("file")}Rebuild the book</button>` : ""}
         <button class="btn" id="check" ${busyNow ? "disabled" : ""}>${icon("refresh")}Check again</button>
-        ${!todo && !report.rebuild && !busyNow ? `<a class="btn primary" href="#/book/${slug}/publish">Next: publish${icon("arrow")}</a>` : ""}</div></div></div>`;
+        ${!todo && !report.rebuild && !busyNow ? `<a class="btn primary" href="#/book/${slug}/publish">Next: publish${icon("arrow")}</a>` : ""}</div></div>
+      ${inQueue.length > 1 ? `<div class="card-b faint small ctl-how">${HOW_FIXES}</div>` : ""}</div>`;
   }
 
   function draw() {
     const box = $("#ctl", host);
     if (!report) {
       $("#ctl-head", host).innerHTML = "";
+      const chk = checking();
       box.innerHTML = `<div class="card act"><div class="act-b"><h3>Check the book</h3>
         <p>Claude looks at every page for real mistakes: spelling, cut or crowded text, pictures that contradict the words. It changes nothing by itself.</p></div>
-        <div class="act-a"><button class="btn primary" id="check">${icon("eye")}Check every page</button></div></div>`;
+        <div class="act-a">${chk ? `<button class="btn primary" disabled><span class="spin"></span>Checking… progress is at the top</button>`
+          : `<button class="btn primary" id="check">${icon("eye")}Check every page</button>`}</div></div>`;
       return;
     }
     drawHead();
@@ -1869,79 +2037,23 @@ async function stepControl(host, b, slug) {
     refreshAll();
   }
 
-  // "Check again" always reads the latest book: it is built first, then every page is read.
+  // "Check again" always reads the latest book: the job builds it first, then Claude reads every page
   async function check(btn) {
-    if (pumping) return;
-    pumping = true;
-    try {
-      if (report) { phase = "build"; drawHead(); }
-      const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
-      const r = await watchJob(job, "Building print files…", 0);
-      if (r?.status === "failed") throw new Error("The book could not be built, so it was not checked.");
-      if (report) { phase = "check"; drawHead(); }
-      await busy(btn, "Reading the pages…", async () => { report = (await api("POST", `/api/books/${slug}/control/check`)).report; });
-      remap();
-    } catch (e) {
-      toast(e.message, true);
-    } finally {
-      phase = null; pumping = false;
-      if (live()) { if (!report) { try { await reload(); } catch {} } draw(); }
-    }
+    await busy(btn, "Adding…", async () => {
+      await api("POST", `/api/books/${slug}/jobs/check`, {});
+      kickJobs();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
   }
 
-  async function applyOne(it) {
-    const i = report.issues.find((x) => x.id === it.id);
-    const r = await api("POST", `/api/books/${slug}/control/${it.id}/apply`, { prompt: it.prompt });
-    if (r.job) await watchJob(r.job, `Redrawing ${i.slot}${i.fix === "margin" ? " inside the margin" : ""}…`, 1);
-  }
-
-  let pumping = false;
-  async function pump() {
-    if (pumping) return;
-    pumping = true;
-    try {
-      while (live()) {
-        let did = false;
-        while (queue.length && live()) {
-          const it = queue.shift();
-          working = it.id; phase = "fix"; refreshIssue(it.id); drawHead();
-          try { await applyOne(it); did = true; } catch (e) { toast(e.message, true); }
-          working = null;
-          await reload();
-          if (live()) { refreshIssue(it.id); drawHead(); }
-        }
-        if (!did || !live()) break;
-        // the queue is done: build the book again so the pages show the fixes. It is not read again by itself:
-        // "Check again" does that when the user asks. Fixes asked for meanwhile wait in the queue.
-        phase = "build"; drawHead(); refreshAll();
-        const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {});
-        await watchJob(job, "Building print files…", 0);
-        ver++;
-        phase = null; await reload(); if (live()) draw();
-        if (!queue.length) break;
-      }
-    } catch (e) {
-      toast(e.message, true);
-    } finally {
-      working = null; phase = null; pumping = false;
-      if (live()) { try { await reload(); } catch {} draw(); }
-    }
-  }
-
-  const enqueue = (id) => {
-    const el = $(`[data-prompt="${id}"]`, host), i = report.issues.find((x) => x.id === id);
-    queue.push({ id, prompt: (el?.value || i.prompt).trim(), page: i.page, fix: i.fix, problem: i.problem });
-    refreshIssue(id); drawHead(); pump();
-  };
-  // a new check numbers its issues again: queued fixes follow their problem (same page, same kind of fix)
-  function remap() {
-    let lost = 0;
-    for (const q of queue.splice(0)) {
-      const cands = report.issues.filter((i) => i.status === "open" && i.page === q.page && i.fix === q.fix && !queue.some((x) => x.id === i.id));
-      const m = cands.find((i) => i.problem === q.problem) || (cands.length === 1 ? cands[0] : null);
-      if (m) queue.push({ ...q, id: m.id }); else lost++;
-    }
-    if (lost) toast(`${lost} queued fix${lost > 1 ? "es were" : " was"} dropped: the new check no longer shows ${lost > 1 ? "them" : "it"}.`);
+  // queue fixes: [{ id, prompt }], the prompt as it is typed in its box now
+  async function queueFixes(ids) {
+    const items = ids.map((id) => ({ id, prompt: ($(`[data-prompt="${id}"]`, host)?.value || report.issues.find((x) => x.id === id).prompt).trim() }));
+    try { await api("POST", `/api/books/${slug}/control/apply`, { items }); }
+    catch (e) { toast(e.message, true); }
+    await reload();
+    if (live()) { refreshAll(); drawHead(); }
+    kickJobs();
   }
   const imageCost = (list) => list.reduce((a, i) => a + (PAID_FIX.has(i.fix) ? i.cost_usd || 0 : 0), 0);
   const redrawNote = (list) => {
@@ -1957,12 +2069,7 @@ async function stepControl(host, b, slug) {
     if (!t || !live()) return;
     if (t.id === "check") return check(t);
     if (t.id === "rebuild") {
-      if (pumping) return;
-      pumping = true; phase = "build"; drawHead();
-      try { const { job } = await api("POST", `/api/books/${slug}/jobs/build`, {}); await watchJob(job, "Building print files…", 0); ver++; }
-      catch (err) { toast(err.message, true); }
-      finally { pumping = false; phase = null; await reload(); draw(); }
-      return;
+      return busy(t, "Adding…", async () => { await api("POST", `/api/books/${slug}/jobs/build`, {}); kickJobs(); });
     }
     if (t.dataset.skip) {   // the issue goes away at once; the page card goes with its last issue
       const id = t.dataset.skip;
@@ -1975,18 +2082,26 @@ async function stepControl(host, b, slug) {
       if (card && !card.querySelector(".ctl-issue")) card.remove(); else if (card) refreshPage(card);
       return drawHead();
     }
-    if (t.dataset.unq) { queue.splice(queue.findIndex((q) => q.id === t.dataset.unq), 1); refreshIssue(t.dataset.unq); return drawHead(); }
+    if (t.dataset.unq) {
+      t.disabled = true;
+      try { await api("DELETE", `/api/books/${slug}/control/${t.dataset.unq}/queue`); } catch (err) { toast(err.message, true); }
+      await reload(); if (live()) { refreshAll(); drawHead(); }
+      return kickJobs();
+    }
     if (t.dataset.apply) {
       const i = report.issues.find((x) => x.id === t.dataset.apply);
       if (PAID_FIX.has(i.fix) && !(await modal({ title: i.fix === "margin" ? "Redraw this picture inside the margin?" : "Redraw this picture?", body: redrawNote([i]), confirm: "Redraw" }))) return;
-      return enqueue(i.id);
+      t.disabled = true;
+      return queueFixes([i.id]);
     }
     if (t.dataset.pageapply) {
       const card = t.closest(".ctl-card");
       const list = $$("[data-pick]", card).filter((c) => c.checked).map((c) => report.issues.find((x) => x.id === c.dataset.pick));
       if (!list.length) return;
-      if (list.some((i) => PAID_FIX.has(i.fix)) && !(await modal({ title: `Apply ${list.length} fixes on page ${t.dataset.pageapply}?`, body: redrawNote(list), confirm: "Apply" }))) return;
-      return list.forEach((i) => enqueue(i.id));
+      if (!(await modal({ title: `Apply ${list.length} fixes on page ${t.dataset.pageapply}?`,
+        body: `${list.some((i) => PAID_FIX.has(i.fix)) ? redrawNote(list) + "<br><br>" : ""}${HOW_FIXES}`, confirm: "Apply" }))) return;
+      t.disabled = true;
+      return queueFixes(list.map((i) => i.id));
     }
     if (t.id === "ignore-all") {
       const list = todoList();
@@ -2000,9 +2115,25 @@ async function stepControl(host, b, slug) {
     if (t.id === "apply-all") {
       const list = todoList();
       const body = list.some((i) => PAID_FIX.has(i.fix)) ? redrawNote(list) : "The words and layout will be fixed.";
-      if (!(await modal({ title: `Apply all ${list.length} fixes?`, body: `${body}<br><br>They run one after another, then the book is rebuilt. Press “Check again” when you want the pages read again.`, confirm: "Apply all" }))) return;
-      list.forEach((i) => enqueue(i.id));
+      if (!(await modal({ title: `Apply all ${list.length} fixes?`, body: `${body}<br><br>${HOW_FIXES} Press “Check again” when you want the pages read again.`, confirm: "Apply all" }))) return;
+      t.disabled = true;
+      return queueFixes(list.map((i) => i.id));
     }
+  });
+
+  // the queue changed: reload the report when a fix, a build or a check ends (new numbering after a check);
+  // when one only starts or waits, refresh the issues it carries
+  let sig = "";
+  onJobs(host, async (list, finished) => {
+    const now = JSON.stringify(list.filter(isActive).map((j) => [j.id, j.status]));
+    if (!finished.length && now === sig) return;
+    sig = now;
+    if (finished.some((j) => BUILD_KINDS.has(j.kind) && j.status === "done")) ver++;
+    const chk = finished.find((j) => j.kind === "check");
+    try { await reload(); } catch { return; }
+    if (!live()) return;
+    if (finished.length) draw(); else { refreshAll(); drawHead(); }
+    if (chk?.status === "done") toast(report?.issues.some((i) => i.status === "open") ? "The new list of problems is below." : "No problems found.");
   });
   draw();
 }
