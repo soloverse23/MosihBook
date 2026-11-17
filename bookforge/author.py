@@ -370,7 +370,8 @@ book:           # fields outside `pages` that change (title, style, characters, 
 ```
 Page numbers always mean the numbers in the "# page N" marks of the book as it is now. A page you list under
 `pages` replaces that page entirely: copy every field you do not change word for word. Never list a page or a
-field the change does not touch. When nothing needs to change, answer with an empty block."""
+field the change does not touch. Only when the book truly already does what is asked, answer with just
+`note:` and one sentence, in the language the request is written in, saying why nothing needs to change."""
 
 
 def numbered(data: dict) -> str:
@@ -390,6 +391,16 @@ def apply_patch(data: dict, patch: dict) -> dict:
         raise ValueError("the answer is not a list of changes")
     pages = list(data.get("pages") or [])
     n = len(pages)
+    patch = dict(patch)
+    book = dict(patch.get("book") or {})
+    if "pages" in book and "pages" not in patch:      # pages put under `book:` by mistake
+        patch["pages"] = book.pop("pages")
+    patch["book"] = book
+    if isinstance(patch.get("pages"), list):          # the whole page list sent back: keep it page by page
+        full = patch["pages"]
+        if len(full) != n:
+            raise ValueError(f"the answer lists {len(full)} pages, the book has {n}: send only the pages that change, by number")
+        patch["pages"] = {i: pg for i, pg in enumerate(full, 1) if pg != pages[i - 1]}
 
     def num(k) -> int:
         try:
@@ -416,7 +427,7 @@ def apply_patch(data: dict, patch: dict) -> dict:
         if i not in gone:
             new_pages.append(pg)
         new_pages += after.get(i, [])
-    out = {**data, **{k: v for k, v in (patch.get("book") or {}).items() if k not in ("pages", *KEPT)}}
+    out = {**data, **{k: v for k, v in book.items() if k not in ("pages", *KEPT)}}
     out["pages"] = new_pages
     return out
 
@@ -424,12 +435,11 @@ def apply_patch(data: dict, patch: dict) -> dict:
 async def revise(book_yaml: str, instruction: str, brief: dict | None = None) -> str:
     """Make one change to the book. Claude sees the book with numbered pages and sends back only what changes;
     everything else is kept as it was, word for word, along with the settings that are not its to change
-    (type, paper, language, structure, images) and the brief's learning rules. Raises when nothing changed."""
+    (type, paper, language, structure, images). The brief is shown so new words keep its style. Raises when
+    nothing changed, with Claude's reason when it gives one."""
     before = yaml.safe_load(book_yaml) or {}
     book_type = before.get("type", BOOK_TYPE)
     fixed = {k: before[k] for k in KEPT if k in before}
-    learning = {k: (brief or {})["learning"][k] for k in ("topic", "explain", "marking")
-                if not _empty(((brief or {}).get("learning") or {}).get(k))}
     style = (f"\n\nThe brief this book was written from. Every word you write keeps its voice, writing style, "
              f"reading level and learning rules:\n{_brief_text(brief)}") if brief and _brief_text(brief) else ""
     prompt = (f"The book, with each page numbered:\n```yaml\n{numbered(before)}```{style}\n\n"
@@ -437,12 +447,25 @@ async def revise(book_yaml: str, instruction: str, brief: dict | None = None) ->
               f"do not reword, tidy or improve anything it does not mention.\n\n{EDIT_FORMAT}")
     system = _system(book_type)
     text = _fenced(await ask(prompt, system), "yaml")
-    for attempt in range(2):
+    retried_empty = False
+    for attempt in range(3):
         try:
-            data = apply_patch(before, yaml.safe_load(text) or {})
+            patch = yaml.safe_load(text) or {}
+            data = apply_patch(before, patch)
             data.update(fixed)
-            if learning:
-                data["learning"] = {**(data.get("learning") or {}), **learning}
+            has_note = isinstance(patch, dict) and bool(patch.get("note"))
+            if data == before and not retried_empty and not has_note:
+                retried_empty = True   # once: say plainly that nothing changed, and ask again
+                text = _fenced(await ask(
+                    f"{prompt}\n\nYour previous answer:\n```yaml\n{text}```\nchanged nothing in the book. Make the "
+                    "change now, writing out each page or field that changes. Only if the book truly already does "
+                    "what is asked, answer with `note:` and why.", system), "yaml")
+                continue
+            if data == before:
+                note = patch.get("note") if isinstance(patch, dict) else None
+                raise AuthorError(f"Claude did not change the book: {note}" if note else
+                                  "Claude made no change to the book. Say more precisely what should change "
+                                  "(which page, which words) and try again.")
             if errs := structure_errors(data):
                 raise ValueError("the pages do not follow the book structure: " + "; ".join(errs))
             if errs := activity_errors(data):
@@ -450,13 +473,12 @@ async def revise(book_yaml: str, instruction: str, brief: dict | None = None) ->
             spec.Book.model_validate(data)
             break
         except (ValidationError, ValueError, yaml.YAMLError, TypeError, AttributeError) as e:
-            if attempt == 1:
+            if attempt == 2:
                 raise AuthorError(f"Claude's change did not fit the book: {e}") from e
             text = _fenced(await ask(f"{prompt}\n\nYour previous answer:\n```yaml\n{text}```\ncould not be applied:\n"
                                      f"{e}\nFix it and answer again in the same shape.", system), "yaml")
-    if data == before:
-        raise AuthorError("Claude made no change to the book. Say more precisely what should change (which page, "
-                          "which words) and try again.")
+    else:
+        raise AuthorError("Claude's change could not be applied. Try again with a shorter request.")
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
 
 

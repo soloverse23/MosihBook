@@ -338,7 +338,7 @@ async def apply_text(current_yaml: str, issue: dict, prompt: str, brief: dict | 
     try:
         new = await author.revise(current_yaml, instruction(issue, prompt), **({"brief": brief} if brief else {}))
     except author.AuthorError as e:
-        if "no change" in str(e):
+        if "no change" in str(e) and "did not change" not in str(e):
             raise author.AuthorError("Claude made no change to the book, so nothing was fixed. Edit the fix and try again.") from e
         raise
     if yaml.safe_load(new) == yaml.safe_load(current_yaml):
