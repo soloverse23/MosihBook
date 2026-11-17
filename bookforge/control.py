@@ -270,6 +270,17 @@ def view(project: Project) -> dict | None:
     return report
 
 
+def is_table_layout(project: Project, issue: dict) -> bool:
+    """A layout problem on a page whose words include a table: the table is sized by the layout code (each
+    column holds its longest word whole), not by anything in book.yaml, so the fix is a rebuild, not an edit."""
+    from .layout.tables import is_table_line
+    if issue.get("fix") != "layout" or issue.get("replace_with"):
+        return False
+    pages = project.book.pages
+    return any(is_table_line(l) for n in issue.get("book_pages") or [issue.get("book_page")]
+               if isinstance(n, int) and 1 <= n <= len(pages) for l in pages[n - 1].text.splitlines())
+
+
 def instruction(issue: dict, prompt: str) -> str:
     """What the editor of book.yaml is told. PDF page numbers differ from the pages of book.yaml (cover, front
     matter), so the page is named by its place in book.yaml and its words are quoted."""

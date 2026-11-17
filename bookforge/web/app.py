@@ -661,7 +661,7 @@ def _queue_fixes(slug: str, items: list[dict]) -> list[str]:
         raise HTTPException(409, "the pages are being read again - wait for the new list of problems")
     report = control.load(p) or {"issues": []}
     by_id = {i["id"]: i for i in report["issues"]}
-    redraw, notes, fit, texts = {}, {}, {}, []
+    redraw, notes, fit, texts, rebuild = {}, {}, {}, [], False
     for it in items:
         issue = by_id.get(it.get("id"))
         if not issue:
@@ -673,7 +673,11 @@ def _queue_fixes(slug: str, items: list[dict]) -> list[str]:
         fix = "margin" if issue["fix"] == "image" and margins.is_margin_request(prompt) and not issue.get("replace_with") \
             else issue["fix"]
         control.set_status(p, issue["id"], "open", prompt, error="")
-        if fix == "margin":
+        if prompt == issue["prompt"] and control.is_table_layout(p, issue):
+            # a cut word in a table: the layout sizes the columns itself, so the rebuild below is the fix
+            control.set_status(p, issue["id"], "applied", prompt, error="")
+            rebuild = True
+        elif fix == "margin":
             fit[issue["id"]] = issue["slot"]
         elif fix == "image":
             redraw[issue["id"]] = issue["slot"]
@@ -691,7 +695,7 @@ def _queue_fixes(slug: str, items: list[dict]) -> list[str]:
             out.append(jobs.start(slug, "margins", slots=list(dict.fromkeys(fit.values())), issues=fit).id)
         if texts:
             out.append(jobs.start(slug, "text", texts=texts).id)
-        if out:
+        if out or rebuild:
             jobs.ensure_build(slug)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(409, str(e))

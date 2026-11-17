@@ -214,3 +214,54 @@ def test_control_knows_the_words_of_exercise_and_solutions_pages(tmp_path, lette
         assert group["answer"] == "poire" and "poire" in group["items"] and "pomme" not in out
     # words that are also printed elsewhere are left to Claude, which is told where to look
     assert control._direct(raw, {**issue, "current": "Nina", "replace_with": "Nora"}) is None
+
+
+CONJUGATION = """Être, avoir, chanter, danser, voler.
+
+| | être | avoir | chanter | danser | voler |
+|---|---|---|---|---|---|
+| je | j'étais | j'avais | chantais | dansais | volais |
+| nous | étions | avions | chantions | dansions | volions |
+| ils/elles | étaient | avaient | chantaient | dansaient | volaient |"""
+
+
+
+@pytest.mark.parametrize("width", [2.2, 3.0, 4.2, 6.4])
+def test_table_cells_never_cut_a_word(tmp_path, width):
+    """A six-column verb table on a narrow page printed "chantio / ns": each column now holds its longest
+    word whole (the font shrinks first), and the page layout never squeezes it below that width."""
+    from reportlab.lib.units import inch
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from bookforge.layout import tables
+    from bookforge.layout.base import Sheet, theme_for
+    book = spec.Book.model_validate(structured_book(False))
+    sheet = Sheet(tmp_path / "x.pdf", (8.5, 8.5), tmp_path, theme_for(book))
+    table = next(f for f in tables.learning_page(sheet, CONJUGATION) if isinstance(f, tables.TableBlock))
+    assert table.min_w < table.want <= table.max_w
+    w = max(width, table.min_w)  # shaped.place never gives a table less than its min_w
+    size, widths = table._layout(w * inch)
+    assert sum(widths) <= w * inch + 0.5 and size >= table.MIN_SIZE
+    pad = 2 * table.PAD
+    for i, r in enumerate(table.rows):
+        font = sheet.theme.heading if i == 0 else sheet.theme.body
+        for c, cw in zip(r, widths):
+            for x in c.split():
+                assert stringWidth(x, font, size) + pad <= cw + 0.01, f"{x!r} cut at {w} in"
+
+
+def test_cut_word_in_a_table_is_fixed_by_a_rebuild_not_a_yaml_edit(tmp_path):
+    """Control's Apply on a layout problem of a page with a table must not ask Claude to edit book.yaml (the
+    table's columns come from the layout code); a wording fix or a layout problem elsewhere still does."""
+    from bookforge import control
+    raw = structured_book(False)
+    ref = next(pg for pg in raw["pages"] if pg["kind"] == "reference")
+    ref["text"] = CONJUGATION
+    (tmp_path / "book.yaml").write_text(yaml.safe_dump(raw, allow_unicode=True))
+    p = Project(tmp_path / "book.yaml", mock=True)
+    n = raw["pages"].index(ref) + 1
+    other = next(k for k, pg in enumerate(raw["pages"], 1) if pg["kind"] == "story")
+    issue = {"fix": "layout", "book_pages": [n], "book_page": n, "replace_with": ""}
+    assert control.is_table_layout(p, issue)
+    assert not control.is_table_layout(p, {**issue, "fix": "text"})
+    assert not control.is_table_layout(p, {**issue, "replace_with": "chantions"})
+    assert not control.is_table_layout(p, {**issue, "book_pages": [other], "book_page": other})

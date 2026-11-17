@@ -11,6 +11,7 @@ import re
 from reportlab.lib.colors import Color, HexColor
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.units import inch
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import Flowable, Paragraph, Table, TableStyle
 
 from .base import Sheet, marked
@@ -31,23 +32,70 @@ class TableBlock(Flowable):
     """A table that takes whatever width it is given: header row on the accent color, pronoun column
     in the accent, rows on alternating soft tints, cells wrapping instead of overflowing."""
 
+    SIZE = 10        # points at scale 1
+    MIN_SIZE = 7.5   # points at scale 1: the font may shrink this far so every word fits its cell whole
+    PAD = 3          # points of cell padding left and right, at scale 1
+
     def __init__(self, sheet: Sheet, rows: list[list[str]], scale: float = 1.0):
         super().__init__()
         self.sheet, self.scale = sheet, scale
         n = max(len(r) for r in rows)
         self.rows = [r + [""] * (n - len(r)) for r in rows]
         self.n = n
-        self.want = min(6.4, 0.85 + 0.95 * (n - 1))  # inches it would like (see shaped._natural)
         self.max_w = 6.4
+        words, lines = self._measure(self.SIZE * scale)
+        # inches it would like (see shaped._natural): every cell on one line, when the page allows
+        self.want = min(self.max_w, sum(lines) / inch + 0.02)
+        # inches it cannot go below: the longest word of each column, whole, at the smallest font
+        self.min_w = sum(self._measure(self.MIN_SIZE * scale)[0]) / inch + 0.02
         self.spaceAfter = 10 * scale
+
+    def _measure(self, size: float) -> tuple[list[float], list[float]]:
+        """Per column, in points with padding: the widest single word, and the widest whole cell on one line."""
+        t = self.sheet.theme
+        pad = 2 * self.PAD * self.scale
+        words, lines = [pad] * self.n, [pad] * self.n
+        for i, r in enumerate(self.rows):
+            font = t.heading if i == 0 else t.body
+            for j, c in enumerate(r):
+                plain = c.replace("[[", "").replace("]]", "")
+                for w in plain.split():
+                    words[j] = max(words[j], stringWidth(w, font, size) + pad)
+                lines[j] = max(lines[j], stringWidth(plain, font, size) + pad)
+        return words, lines
+
+    def _layout(self, aw: float) -> tuple[float, list[float]]:
+        """The font size and column widths for `aw` points: the largest size (down to MIN_SIZE) at which each
+        column holds its longest word whole; the room left goes first to the columns whose cells would
+        otherwise wrap, then evenly. No word is ever cut inside a cell."""
+        s = self.scale
+        size = self.SIZE * s
+        while True:
+            words, lines = self._measure(size)
+            if sum(words) <= aw or size <= self.MIN_SIZE * s:
+                break
+            size -= 0.25 * s
+        widths = list(words)
+        extra = aw - sum(widths)
+        if extra > 0:
+            short = [l - w for w, l in zip(words, lines)]  # what each column lacks to set its cells on one line
+            gap = sum(short)
+            if gap > 0:
+                give = min(extra, gap)
+                widths = [w + give * d / gap for w, d in zip(widths, short)]
+                extra -= give
+            widths = [w + extra / self.n for w in widths]
+        return size, widths
 
     def _table(self, aw: float) -> Table:
         t, s = self.sheet.theme, self.scale
         color = self.sheet.mark_color
-        size = 10 * s
-        head = self.sheet.style(size, font=t.heading, align=TA_CENTER, color="#FFFFFF", leading=1.2)
-        lead = self.sheet.style(size, align=TA_LEFT, color=t.accent, leading=1.25)
-        cell = self.sheet.style(size, align=TA_CENTER, leading=1.25)
+        size, widths = self._layout(aw)
+        # a word is never split across two lines of a cell (it would read "chantio / ns")
+        head = self.sheet.style(size, font=t.heading, align=TA_CENTER, color="#FFFFFF", leading=1.2,
+                                splitLongWords=0)
+        lead = self.sheet.style(size, align=TA_LEFT, color=t.accent, leading=1.25, splitLongWords=0)
+        cell = self.sheet.style(size, align=TA_CENTER, leading=1.25, splitLongWords=0)
         for st in (head, lead, cell):
             st.spaceAfter = 0
         data = []
@@ -56,8 +104,6 @@ class TableBlock(Flowable):
                 data.append([Paragraph(marked(c, color), head) for c in r])
             else:
                 data.append([Paragraph(marked(c, color), lead if j == 0 else cell) for j, c in enumerate(r)])
-        first = min(aw * 0.2, 0.95 * inch)
-        widths = [first] + [(aw - first) / (self.n - 1)] * (self.n - 1) if self.n > 1 else [aw]
         tint = HexColor(t.accent)
         soft = Color(tint.red, tint.green, tint.blue, alpha=0.08)
         style = [
@@ -65,7 +111,7 @@ class TableBlock(Flowable):
             ("BACKGROUND", (0, 0), (-1, 0), tint),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("TOPPADDING", (0, 0), (-1, -1), 3.5 * s), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5 * s),
-            ("LEFTPADDING", (0, 0), (-1, -1), 3 * s), ("RIGHTPADDING", (0, 0), (-1, -1), 3 * s),
+            ("LEFTPADDING", (0, 0), (-1, -1), self.PAD * s), ("RIGHTPADDING", (0, 0), (-1, -1), self.PAD * s),
             ("LINEBELOW", (0, 1), (-1, -2), 0.4, Color(tint.red, tint.green, tint.blue, alpha=0.25)),
             ("BOX", (0, 0), (-1, -1), 0.8, tint),
             ("ROUNDEDCORNERS", [6, 6, 6, 6]),
