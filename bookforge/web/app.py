@@ -373,13 +373,11 @@ async def textcheck_apply(slug: str, body: dict = Body(...)):
     return {**out, "report": textcheck.view(f)}
 
 
-@app.post("/api/books/{slug}/translate")
-async def translate_book(slug: str, body: dict = Body(...)):
-    """A copy of this finished book in another language, reusing its illustrations."""
+def _translation_source(slug: str, body: dict) -> tuple:
+    """The finished book to translate and the language asked for: (folder, book data, language)."""
     import yaml
-    from .. import translate
-    d = _dir(slug)
     from ..words import LANGUAGES, canonical
+    d = _dir(slug)
     language = canonical((body.get("language") or "").strip()) if (body.get("language") or "").strip() else None
     if not language:
         raise HTTPException(400, f"choose one of: {', '.join(LANGUAGES)}")
@@ -394,9 +392,46 @@ async def translate_book(slug: str, body: dict = Body(...)):
         raise HTTPException(422, f"book.yaml is not valid: {spec_err}")
     if language == canonical(data.get("language")):
         raise HTTPException(400, f"the book is already in {language}")
+    return d, data, language
+
+
+@app.post("/api/books/{slug}/translate/plan")
+async def translate_plan(slug: str, body: dict = Body(...)):
+    """Before a full translation: the learning points that only work in the book's language, as questions for
+    the author ({questions: [{id, where, label, issue, question, options}], auto: [{where, label, change}]}).
+    A book with nothing that teaches or tests gets no questions, without asking Claude."""
+    from .. import translate
+    from ..words import canonical
+    d, data, language = _translation_source(slug, body)
+    ctx = translate.context(data)
+    if not ctx:
+        return {"language": language, "questions": [], "auto": []}
+    plan = await _claude(author.translation_plan(translate.texts(data, translate.finds(d / "build")), language,
+                                                 canonical(data.get("language")) or "English", ctx))
+    return {"language": language, **{k: [{**x, "label": translate.label(data, x.get("where", ""))} for x in v]
+                                     for k, v in plan.items()}}
+
+
+@app.post("/api/books/{slug}/translate")
+async def translate_book(slug: str, body: dict = Body(...)):
+    """A full translation of this finished book, reusing its illustrations. `answers` are the author's answers
+    to the plan's questions ([{where, question, answer}]); Claude follows them."""
+    from .. import translate
+    from ..words import canonical
+    d, data, language = _translation_source(slug, body)
+    decisions = [{"where": a.get("where") or "", "question": str(a.get("question") or ""),
+                  "answer": str(a.get("answer") or "")} for a in body.get("answers") or [] if a.get("question")]
     words = translate.texts(data, translate.finds(d / "build"))
-    translated = await _claude(author.translate(words, language, canonical(data.get("language")) or "English",
-                                                translate.check))
+    # a full translation: games and lessons are adapted and play-tested in the new language (translate.py)
+    ctx = translate.context(data)
+    full = await _claude(author.translate_full(
+        words, language, canonical(data.get("language")) or "English",
+        lambda o, t: translate.check(o, t) + translate.fits(data, t), ctx,
+        lambda t: translate.teaching_view(data, t, ctx), decisions))
+    translated = full["texts"]
+    adaptation = {k: [{"where": translate.label(data, x["where"]), "text": x.get("change") or x.get("problem")}
+                      for x in full[src]] for k, src in (("changes", "adapted"), ("warnings", "unresolved"))}
+    adaptation["decisions"] = [{**x, "where": translate.label(data, x["where"])} for x in decisions]
     new_slug = state.slugify(f"{slug[:28]}-{language}")
     result = translate.make(d, state.books_dir() / new_slug, data, translated, language)
     st = state.load_state(slug)
@@ -404,9 +439,9 @@ async def translate_book(slug: str, body: dict = Body(...)):
     origin = st.get("translated_from")
     root = origin if origin and (state.books_dir() / origin).is_dir() else slug
     brief = {**(st.get("brief") or {}), "language": language, "title": translated.get("title", data.get("title"))}
-    state.save_state(new_slug, step="art", brief=brief, translated_from=root,
+    state.save_state(new_slug, step="art", brief=brief, translated_from=root, adaptation=adaptation,
                      **{k: st[k] for k in ("outline",) if k in st})
-    return {"slug": new_slug, **result,
+    return {"slug": new_slug, **result, "adaptation": adaptation,
             "redraw_cost_usd": round(sum(spec.Book.model_validate(data).images.cost(s) for s in result["redraw"]), 2)}
 
 

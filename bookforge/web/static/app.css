@@ -989,3 +989,19 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 .tc-text .txt { white-space: pre-wrap; }
 .pg.flash { animation: pg-flash 2.4s ease-out; }
 @keyframes pg-flash { 0%, 30% { background: color-mix(in srgb, var(--accent, #6366F1) 14%, transparent); } 100% { background: transparent; } }
+
+/* full-translation warnings: the text takes the width, Ignore sits at the right of its own line */
+.tr-warn { list-style: none; padding-left: 0 !important; display: grid; gap: var(--s2); }
+.tr-warn li { display: flex; align-items: flex-start; gap: var(--s3); }
+.tr-warn li > span { flex: 1; min-width: 0; }
+.tr-warn .ignore { margin: 0; flex: none; }
+
+/* a wide dialog whose body scrolls (Claude's questions before a full translation) */
+.modal.wide { width: min(680px, 100%); max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
+.modal.wide .mb { overflow-y: auto; min-height: 0; }
+.trq .q:first-child { border-top: 0; padding-top: var(--s2); }
+.trq .q { padding: var(--s4) 0; }
+.trq-where { font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+.trq-auto { border-top: 1px solid var(--line); padding-top: var(--s3); }
+.trq-auto summary { cursor: pointer; font-weight: 550; color: var(--ink-2); }
+.trq-auto ul { margin: var(--s2) 0 0; padding-left: 18px; display: grid; gap: 4px; }

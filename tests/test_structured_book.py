@@ -265,3 +265,99 @@ def test_cut_word_in_a_table_is_fixed_by_a_rebuild_not_a_yaml_edit(tmp_path):
     assert not control.is_table_layout(p, {**issue, "fix": "text"})
     assert not control.is_table_layout(p, {**issue, "replace_with": "chantions"})
     assert not control.is_table_layout(p, {**issue, "book_pages": [other], "book_page": other})
+
+
+def test_full_translation_finds_what_teaches_and_what_breaks():
+    """Step 1 and the structure check of a full translation (bookforge/translate.py)."""
+    from bookforge import translate
+    data = structured_book(False)
+    ctx = translate.context(data)
+    kinds = {data["pages"][int(p["where"].split(".")[1])].get("kind") for p in ctx["pages"]}
+    assert ctx["learning"]["marking"] == MARKING
+    assert {"story", "matching", "fill_in", "odd_one_out", "main_game"} <= kinds  # marked story pages count too
+    assert not kinds & {"maze", "coloring", "copyright", "collection"}
+    assert translate.context({"title": "x", "pages": [{"text": "a fox", "prompt": "a fox"}]}) == {}
+    assert translate.label(data, ctx["pages"][-1]["where"]).startswith("Page ")
+
+    texts = translate.texts(data)
+    assert translate.fits(data, texts) == []
+    game = next(i for i, p in enumerate(data["pages"]) if p.get("matching"))
+    odd = next(i for i, p in enumerate(data["pages"]) if p.get("odd_one_out"))
+    # two words that become the same word in the new language: two right answers, the game breaks
+    clash = {**texts, f"pages.{game}.matching.pairs.0.0": "hot", f"pages.{game}.matching.pairs.1.0": "hot"}
+    assert any("matching" in e for e in translate.fits(data, clash))
+    clash = {**texts, f"pages.{odd}.odd_one_out.groups.0.items.0": "pet", f"pages.{odd}.odd_one_out.groups.0.items.1": "pet"}
+    assert any("odd_one_out" in e for e in translate.fits(data, clash))
+    view = yaml.safe_load(translate.teaching_view(data, texts, ctx))
+    assert view["learning"]["marking"] == MARKING and any(p.get("odd_one_out") for p in view["pages"])
+
+
+@pytest.mark.parametrize("fixed", [True, False])
+def test_full_translation_adapts_then_playtests(monkeypatch, fixed):
+    """Steps 2-4: Claude adapts, a play-test checks, its findings go back once more; what stays broken is reported."""
+    from bookforge import translate
+    data = structured_book(False)
+    ctx = translate.context(data)
+    texts = translate.texts(data)
+    odd = next(f"pages.{i}" for i, p in enumerate(data["pages"]) if p.get("odd_one_out"))
+    prompts = []
+
+    async def fake_ask(prompt, system, schema=None, images=()):
+        prompts.append(prompt)
+        if schema is author.PLAYTEST_SCHEMA:
+            assert "[EN]" in prompt  # the tester reads the translated book
+            bad = not fixed or not any(s is author.PLAYTEST_SCHEMA for s in kinds)  # the first play-test fails
+            kinds.append(schema)
+            return {"problems": [{"where": odd, "problem": "Two items are fruit in English."}] if bad else []}
+        kinds.append(schema)
+        return {"items": [{"id": k, "text": f"[EN] {v}"} for k, v in texts.items()],
+                "adapted": [{"where": odd, "change": "New groups: the French ones hinged on gender."}]}
+    kinds = []
+    monkeypatch.setattr(author, "ask", fake_ask)
+    out = asyncio.run(author.translate_full(texts, "English", "French",
+                                            lambda o, t: translate.check(o, t) + translate.fits(data, t), ctx,
+                                            lambda t: translate.teaching_view(data, t, ctx)))
+    assert out["texts"]["title"] == "[EN] Nina à la plage"
+    assert out["adapted"] == [{"where": odd, "change": "New groups: the French ones hinged on gender."}]
+    assert "Teaching parts" in prompts[0] and "Two items are fruit in English." in prompts[2]
+    if fixed:
+        assert out["unresolved"] == [] and len(prompts) == 4
+    else:  # three rounds at most, then what is still wrong is handed to the user instead of failing
+        assert out["unresolved"][0]["where"] == odd and len(prompts) == 6
+
+
+def test_full_translation_asks_before_translating(monkeypatch):
+    """Claude names the learning points that break in the new language and asks how each should work;
+    the author's answers then go into the translation itself."""
+    from bookforge import translate
+    data = structured_book(False)
+    ctx = translate.context(data)
+    texts = translate.texts(data)
+    odd = next(f"pages.{i}" for i, p in enumerate(data["pages"]) if p.get("odd_one_out"))
+    seen = []
+
+    async def fake_ask(prompt, system, schema=None, images=()):
+        seen.append(prompt)
+        if schema is author.TRANSLATION_PLAN_SCHEMA:
+            assert "Teaching parts" in prompt and MARKING in prompt
+            return {"questions": [{"id": "", "where": "learning", "issue": "French adjectives agree; English ones do not.",
+                                   "question": "What should the adjective lesson teach in English?",
+                                   "options": ["Opposites (hot / cold)", "  ", "Comparatives (big / bigger)"]}] * 8,
+                    "auto": [{"where": odd, "change": "New groups, the French ones hinged on gender."}, {"where": odd, "change": " "}]}
+        if schema is author.PLAYTEST_SCHEMA:
+            return {"problems": []}
+        return {"items": [{"id": k, "text": f"[EN] {v}"} for k, v in texts.items()], "adapted": []}
+    monkeypatch.setattr(author, "ask", fake_ask)
+    plan = asyncio.run(author.translation_plan(texts, "English", "French", ctx))
+    assert len(plan["questions"]) == 6 and plan["questions"][0]["id"] == "q1"  # at most 6, each with an id
+    assert plan["questions"][0]["options"] == ["Opposites (hot / cold)", "Comparatives (big / bigger)"]
+    assert plan["auto"] == [{"where": odd, "change": "New groups, the French ones hinged on gender."}]
+
+    q = plan["questions"][0]
+    asyncio.run(author.translate_full(texts, "English", "French", lambda o, t: [], ctx,
+                                      lambda t: translate.teaching_view(data, t, ctx),
+                                      [{"where": "learning", "question": q["question"], "answer": "Comparatives (big / bigger)"},
+                                       {"where": odd, "question": "Keep the groups?", "answer": ""}]))
+    sent = seen[-2]  # the translation prompt, before the play-test
+    assert "Follow every answer exactly" in sent and "-> Comparatives (big / bigger)" in sent
+    assert "Keep the groups? -> no answer: you decide" in sent

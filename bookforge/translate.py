@@ -1,7 +1,19 @@
-"""A finished book in another language: the same illustrations, only the words change.
+"""A finished book in another language (a full translation): the same illustrations, every page kept.
 
 Every image whose prompt is unchanged by the translation is reused as is (no cost). Images with the
 book's words drawn into them (text_in_art) change prompt, so they are left out and drawn again.
+
+Games, lessons and [[marked]] learning words often only work in the language they were written in
+(a rhyme, a first letter, a grammar rule, an odd one out that hinges on spelling). A full translation
+runs a short workflow over those parts:
+  1. scan     `context()` finds them, for free, before Claude is asked anything
+  2. adapt    Claude translates the book and rewrites the parts that would break, so they teach the same
+              thing at the same level in the new language and still fit the same picture
+  3. check    `fits()` re-validates the translated book (one answer per game, distinct items), then a
+              play-test (author.playtest) solves every game and lesson as a reader of the new language
+  4. report   what was adapted is kept with the new book (behind a button); only what Claude could not
+              fix is shown as a warning
+Books with none of these parts are translated in one pass, exactly as before.
 """
 from __future__ import annotations
 
@@ -95,7 +107,8 @@ def apply(data: dict, translated: dict[str, str]) -> dict:
         for g_old, g_new in zip((p_old.get("odd_one_out") or {}).get("groups") or [],
                                 (p_new.get("odd_one_out") or {}).get("groups") or []):
             norm = [x.strip().lower() for x in g_old["items"]]
-            g_new["answer"] = g_new["items"][norm.index(g_old["answer"].strip().lower())]
+            if g_old["answer"].strip().lower() in norm:
+                g_new["answer"] = g_new["items"][norm.index(g_old["answer"].strip().lower())]
     return out
 
 
@@ -108,6 +121,61 @@ def check(original: dict[str, str], translated: dict[str, str]) -> list[str]:
     errs += [f"{k}: keep {ph} exactly as it is" for k in original if k in translated
              for ph in ("{year}", "{author}") if ph in original[k] and ph not in translated[k]]
     return errs
+
+
+# template sections whose words teach or test something (bookforge/templates.py KINDS)
+TEACHING_KINDS = {"parents_note", "theme_intro", "reference", "comprehension", "main_game", "matching", "fill_in",
+                  "odd_one_out", "observation", "guided_drawing", "imagination", "final_challenge"}
+
+
+def context(data: dict) -> dict:
+    """Step 1 of a full translation: the parts that may only work in the book's own language.
+    {"learning": {...} | None, "pages": [{"where": "pages.<i>", "kind", "picture"}]}; {} when there are none."""
+    pages = []
+    for i, p in enumerate(data.get("pages") or []):
+        kind = p.get("kind")
+        if kind in TEACHING_KINDS or "[[" in (p.get("text") or "") or any(p.get(k) for k in spec.DATA_KINDS.values()):
+            pages.append({"where": f"pages.{i}", "kind": kind or "story page with marked learning words",
+                          "picture": p.get("prompt") or ""})
+    learning = {k: v for k, v in (data.get("learning") or {}).items() if k in ("topic", "explain", "marking") and v}
+    return {"learning": learning or None, "pages": pages} if learning or pages else {}
+
+
+def fits(data: dict, translated: dict[str, str]) -> list[str]:
+    """What breaks once the translation is in the book: two items that became the same word, an
+    odd-one-out answer that is no longer exactly one of its items, anything else the book's rules refuse."""
+    from pydantic import ValidationError
+    try:
+        spec.Book.model_validate(apply(data, translated))
+    except ValidationError as e:
+        return [f"{'.'.join(map(str, err['loc'])) or 'book'}: {err['msg']}" for err in e.errors()]
+    except (ValueError, KeyError, IndexError, TypeError) as e:
+        return [f"book: {e}"]
+    return []
+
+
+def teaching_view(data: dict, translated: dict[str, str], ctx: dict) -> str:
+    """What the play-test reads: the translated lesson and teaching pages, answers and pictures included."""
+    book = apply(data, translated)
+    fields = ("chapter", "text", *dict.fromkeys(spec.DATA_KINDS.values()))
+    pages = []
+    for c in ctx.get("pages") or []:
+        p = book["pages"][int(c["where"].split(".")[1])]
+        pages.append({"where": c["where"], "kind": c["kind"], "picture": c["picture"],
+                      **{k: p[k] for k in fields if p.get(k)}})
+    lesson = {k: v for k, v in (book.get("learning") or {}).items() if k in ("topic", "explain", "marking")}
+    return yaml.safe_dump({"learning": lesson or None, "pages": pages}, sort_keys=False, allow_unicode=True, width=100)
+
+
+def label(data: dict, where: str) -> str:
+    """'pages.3' -> 'Page 4 (Odd one out)': where a change or a problem is, in the user's words."""
+    from .templates import KINDS
+    parts = (where or "").split(".")
+    pages = data.get("pages") or []
+    if parts[0] == "pages" and len(parts) > 1 and parts[1].isdigit() and int(parts[1]) < len(pages):
+        kind = pages[int(parts[1])].get("kind")
+        return f"Page {int(parts[1]) + 1}" + (f" ({KINDS[kind][0]})" if kind in KINDS else "")
+    return {"learning": "The lesson", "finds": "Things to find"}.get(parts[0], "The book")
 
 
 def finds(build: Path) -> dict:

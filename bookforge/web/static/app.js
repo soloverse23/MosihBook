@@ -149,18 +149,18 @@ function toast(msg, err = false) {
 }
 
 // Promise-based modal. Resolves to the form values (or true) on confirm, null on cancel.
-function modal({ title, body = "", confirm = "Confirm", danger = false, fields = "" }) {
+function modal({ title, body = "", confirm = "Confirm", danger = false, fields = "", cancel = true, wide = false }) {
   return new Promise((resolve) => {
     const root = document.getElementById("modal-root");
-    root.innerHTML = `<div class="backdrop"><form class="modal" role="dialog" aria-modal="true" aria-labelledby="m-t">
+    root.innerHTML = `<div class="backdrop"><form class="modal${wide ? " wide" : ""}" role="dialog" aria-modal="true" aria-labelledby="m-t">
       <div class="mb"><h2 id="m-t">${esc(title)}</h2>${body ? `<p>${body}</p>` : ""}${fields}</div>
-      <div class="mf"><button type="button" class="btn" data-x>Cancel</button>
+      <div class="mf">${cancel ? `<button type="button" class="btn" data-x>Cancel</button>` : ""}
         <button class="btn ${danger ? "danger solid" : "primary"}">${esc(confirm)}</button></div></form></div>`;
     const form = $("form", root);
     const close = (v) => { root.innerHTML = ""; document.removeEventListener("keydown", onKey); resolve(v); };
     const onKey = (e) => e.key === "Escape" && close(null);
     document.addEventListener("keydown", onKey);
-    $("[data-x]", root).onclick = () => close(null);
+    $("[data-x]", root)?.addEventListener("click", () => close(null));
     // braces matter: an onclick that returns false cancels the click, which would block the submit button
     $(".backdrop", root).onclick = (e) => { if (e.target.classList.contains("backdrop")) close(null); };
     form.onsubmit = (e) => { e.preventDefault(); const v = Object.fromEntries(new FormData(form)); close(Object.keys(v).length ? v : true); };
@@ -576,7 +576,7 @@ async function library() {
         <a class="btn primary" href="#/new">${icon("plus")}New book</a></div></div>
     ${books.length ? `<div class="books">${books.filter(show).map((b) => `<div class="tile${b.origin ? " edition" : ""}">
       <div class="menu tile-act"><button class="btn icon sm" data-more="1" aria-label="More actions" aria-haspopup="true">${icon("more")}</button>
-        <div class="menu-pop" hidden>${b.status === "ready" ? `<button data-tr="${b.origin?.slug || b.slug}" data-title="${esc(b.origin?.title || b.title)}" title="Same pictures, translated text">${icon("globe")}Translate</button>` : ""}
+        <div class="menu-pop" hidden>${b.status === "ready" ? `<button data-tr="${b.origin?.slug || b.slug}" data-title="${esc(b.origin?.title || b.title)}" title="Full translation: same pictures, every page and game">${icon("globe")}Translate</button>` : ""}
           <button class="danger" data-rm="${b.slug}" data-title="${esc(b.title)}">${icon("trash")}Remove book</button></div></div>
       <a class="book" href="#/book/${b.slug}">
         <div class="cover">${b.cover ? `<img src="/api/books/${b.slug}/front.jpg?${b.updated}" alt="">` : coverPlaceholder(b.title, b.type)}
@@ -612,24 +612,91 @@ const LANG_ALIAS = { en: "English", fr: "French", francais: "French", "français
 const langOf = (v) => { const k = String(v || "English").trim().toLowerCase();
   return LANGS.find((l) => l.toLowerCase() === k) || LANG_ALIAS[k] || "English"; };
 async function translateBook(slug, title, btn) {
-  const v = await modal({ title: `Translate “${title}”`, confirm: "Translate",
-    body: "The same art and the same text, translated by Claude. Pictures without words in them are reused as they are, and the new book is laid out straight away.",
+  const v = await modal({ title: `Full translation of “${title}”`, confirm: "Translate",
+    body: "Every page in another language, with the same art. Claude also plays every game and lesson in the new language and adapts any that only worked in the original. Pictures without words in them are reused as they are.",
     fields: `<div class="field" style="margin-top:var(--s3)"><label for="tr-lang-m">Language</label>
       <select class="input" id="tr-lang-m" name="language">${LANGS.map((l) => `<option value="${l}">${LANG_NATIVE[l]}</option>`).join("")}</select></div>` });
   if (v?.language?.trim()) await runTranslate(slug, v.language.trim(), btn);
 }
 
+// A full translation, step by step: Claude reads the book for lessons and games that only work in its own
+// language and asks how each should work in the new one; then it translates with those answers, play-tests
+// every game in the new language and reports (bookforge/translate.py).
 async function runTranslate(slug, language, btn) {
-  toast(`Claude is translating into ${language}. This takes about a minute.`);
-  const r = await busy(btn, "Translating…", () => api("POST", `/api/books/${slug}/translate`, { language }));
+  toast(`Claude is reading the book for lessons and games that may not work in ${language}.`);
+  const plan = await busy(btn, "Reading the book…", () => api("POST", `/api/books/${slug}/translate/plan`, { language }));
+  if (!plan) return;
+  let answers = [];
+  if (plan.questions.length || plan.auto.length) {
+    answers = await translationQuestions(plan, language);
+    if (!answers) return;
+  }
+  toast(`Claude is translating into ${language} and checking every game still works. This takes a minute or two.`);
+  const r = await busy(btn, "Translating…", () => api("POST", `/api/books/${slug}/translate`, { language, answers }));
   if (!r) return;
+  const changed = r.adaptation?.changes?.length || 0;
+  const adapted = changed ? ` ${changed} part${changed > 1 ? "s" : ""} adapted to work in ${language}.` : "";
   if (!r.redraw.length) {
     await api("POST", `/api/books/${r.slug}/jobs/build`).catch((e) => toast(e.message, true));
-    toast(`Translated. All ${r.reused.length} pictures reused, laying out the book now.`);
+    toast(`Translated. All ${r.reused.length} pictures reused, laying out the book now.${adapted}`);
   } else {
-    toast(`Translated. ${r.reused.length} pictures reused. ${r.redraw.length} have the words drawn into them and need redrawing (about ${money(r.redraw_cost_usd)}).`);
+    toast(`Translated.${adapted} ${r.reused.length} pictures reused. ${r.redraw.length} have the words drawn into them and need redrawing (about ${money(r.redraw_cost_usd)}).`);
   }
   location.hash = `#/book/${r.slug}/art`;
+  // only what Claude could not fix interrupts; the list of changes waits behind a button on the book
+  if (r.adaptation?.warnings?.length) await modal({ title: `Check before publishing in ${language}`, confirm: "OK", cancel: false,
+    body: `Claude could not make these work in ${language}. Fix them in the text, or ignore them on the Publish page.`,
+    fields: `<ul class="small">${r.adaptation.warnings.map((w) => `<li><b>${esc(w.where)}</b>: ${unmark(w.text)}</li>`).join("")}</ul>` });
+}
+
+// Claude quotes marked learning words with their [[ ]] marks: show them in bold, as the reader sees them
+const unmark = (t) => esc(t).replace(/\[\[(.+?)\]\]/g, "<b>$1</b>");
+
+// what a full translation adapted (behind a button) and what it could not fix (a warning with Ignore)
+function adaptationHtml(b, slug) {
+  const a = b.state?.adaptation;
+  if (!a) return "";
+  const key = (w) => `tr|${w.where}|${w.text}`;
+  const warns = notIgnored(slug, a.warnings, key);
+  return `${warns.length ? `<div data-ignorable>${note("warn", `<b>Still to check after the translation</b><ul class="tr-warn">${
+      warns.map((w) => `<li><span><b>${esc(w.where)}</b>: ${unmark(w.text)}</span>${ignoreBtn(slug, key(w))}</li>`).join("")}</ul>`)}</div>` : ""}
+    ${a.changes?.length ? `<button class="btn sm ghost" id="tr-changes" style="justify-self:start;align-self:flex-start;width:auto">${icon("info")}What was adapted (${a.changes.length})</button>` : ""}`;
+}
+
+function wireAdaptation(b) {
+  const a = b.state?.adaptation, btn = $("#tr-changes");
+  const list = (xs, f) => `<ul class="small">${xs.map((x) => `<li><b>${esc(x.where)}</b>: ${f(x)}</li>`).join("")}</ul>`;
+  if (btn && a) btn.onclick = () => modal({ title: "Adapted for this language", confirm: "OK", cancel: false, wide: true,
+    body: "These games and lessons only worked in the original language, so Claude rewrote them to teach the same thing here.",
+    fields: `${a.decisions?.length ? `<span class="label">Your answers</span>${list(a.decisions, (d) =>
+        `${esc(d.question)} <i>${esc(d.answer || "Claude decided")}</i>`)}<span class="label">What changed</span>` : ""}${list(a.changes, (c) => unmark(c.text))}` });
+}
+
+// Claude's questions before a full translation: one per learning point that has more than one good way to
+// work in the new language. Pick a suggestion or write your own; a blank answer lets Claude decide.
+// Resolves to [{where, question, answer}], or null when cancelled.
+async function translationQuestions(plan, language) {
+  const qs = plan.questions;
+  const done = modal({ title: `Before translating into ${language}`, confirm: `Translate into ${language}`, wide: true,
+    body: qs.length ? `Claude read the book. These learning points only work in the original language, so ${language} needs your choice. Pick a suggestion or write your own; leave one blank and Claude decides.`
+      : `Claude read the book. Nothing needs your choice: the parts below will be adapted so they work in ${language}.`,
+    fields: `<div class="trq">${qs.map((q, i) => `
+      <div class="q"><span class="n">${i + 1}</span><div>
+        <div class="trq-where">${esc(q.label)}</div>
+        <div class="qt">${esc(q.question)}</div><div class="qwhy">${unmark(q.issue)}</div>
+        ${q.options.length ? `<div class="chips">${q.options.map((o, k) => `<button type="button" class="chip ${k === 0 ? "on" : ""}">${esc(o)}</button>`).join("")}</div>` : ""}
+        <input class="input" name="${esc(q.id)}" aria-label="${esc(q.question)}" value="${esc(q.options[0] || "")}" placeholder="Your answer"></div></div>`).join("")}</div>
+      ${plan.auto.length ? `<details class="trq-auto" ${qs.length ? "" : "open"}><summary>${qs.length ? "Also adapted, no choice needed" : "To be adapted"} (${plan.auto.length})</summary>
+        <ul class="small">${plan.auto.map((a) => `<li><b>${esc(a.label)}</b>: ${unmark(a.change)}</li>`).join("")}</ul></details>` : ""}` });
+  $$("#modal-root .q").forEach((q) => {
+    const input = $("input", q), chips = $$(".chip", q);
+    const mark = () => chips.forEach((x) => x.classList.toggle("on", x.textContent === input.value));
+    chips.forEach((c) => (c.onclick = () => { input.value = c.textContent; mark(); }));
+    input.oninput = mark;
+  });
+  const v = await done;
+  if (!v) return null;
+  return qs.map((q) => ({ where: q.where, question: q.question, answer: (v[q.id] || "").trim() }));
 }
 
 // ---------- character library ----------
@@ -2374,9 +2441,10 @@ function editionsCard(b, slug) {
       ${e.slug === slug ? `<span class="faint xs">this book</span>` : badge(e.status)}</a>`;
   return `<div class="card tr-card"><div class="card-h"><div><h3>${icon("globe")}Another language</h3></div></div>
     <div class="card-b stack">
-      <p class="small">The whole book again in another language: <b>the same art</b> and <b>the same text</b>, translated by Claude and laid out as its own book.</p>
+      <p class="small">A full translation: the whole book again in another language, with <b>the same art</b> and <b>every page</b>, laid out as its own book. Games and lessons that only work in the original language are adapted.</p>
+      ${adaptationHtml(b, slug)}
       ${built ? `<div class="stack tight">
-          <span class="label">Translate “${esc(source.title)}” into</span>
+          <span class="label">Full translation of “${esc(source.title)}” into</span>
           ${LANGS.some((l) => !made.has(l.toLowerCase())) ? `<div class="tr-langs" id="tr-chips">${LANGS.filter((l) => !made.has(l.toLowerCase()))
             .map((l) => `<button class="btn" data-lang="${l}">${icon("globe")}${LANG_NATIVE[l]}</button>`).join("")}</div>`
             : `<p class="muted small">This book is already in all ${LANGS.length} languages.</p>`}
@@ -2390,6 +2458,7 @@ function editionsCard(b, slug) {
 function wireEditions(b, slug) {
   const source = b.editions?.origin?.slug || slug;
   $$("#tr-chips [data-lang]").forEach((c) => (c.onclick = () => runTranslate(source, c.dataset.lang, c)));
+  wireAdaptation(b);
 }
 
 function wireCopy() {

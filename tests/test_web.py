@@ -305,10 +305,19 @@ def test_translate_keeps_the_art(client, monkeypatch, lettered):
         assert not check(texts, out)
         return out
     monkeypatch.setattr(author, "translate", fake)
+
+    async def no_plan(*a):
+        raise AssertionError("nothing in this book teaches or tests: no questions, no Claude call")
+    monkeypatch.setattr(author, "translation_plan", no_plan)
+    assert client.post(f"/api/books/{slug}/translate/plan", json={"language": "French"}).json() == \
+        {"language": "French", "questions": [], "auto": []}
+    assert client.post(f"/api/books/{slug}/translate/plan", json={"language": "English"}).status_code == 400
     r = client.post(f"/api/books/{slug}/translate", json={"language": "French"}).json()
     new = Path(settings.load().books_dir) / r["slug"]
     book = yaml.safe_load((new / "book.yaml").read_text())
     assert book["language"] == "French" and book["title"].startswith("[FR]")
+    # nothing in this book teaches or tests: a plain translation, nothing adapted, nothing to warn about
+    assert r["adaptation"] == {"changes": [], "warnings": [], "decisions": []} == state.load_state(r["slug"])["adaptation"]
     assert all(p["text"].startswith("[FR]") for p in book["pages"] if p.get("text") and "[[" not in p["text"])
     assert {p.name for p in (new / "characters").iterdir()} == {p.name for p in (build.parent / "characters").iterdir()}
     kept = sorted(p.stem for p in (new / "build" / "art").glob("*.png"))

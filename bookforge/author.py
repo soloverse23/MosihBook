@@ -583,6 +583,166 @@ async def translate(texts: dict[str, str], language: str, source_language: str, 
     raise AuthorError("Claude's translation was incomplete: " + "; ".join(errs[:6]))
 
 
+FULL_TRANSLATION_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["items", "adapted"],
+    "properties": {
+        "items": TRANSLATION_SCHEMA["properties"]["items"],
+        "adapted": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["where", "change"],
+            "properties": {"where": {"type": "string"}, "change": {"type": "string"}}}}},
+}
+PLAYTEST_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["problems"],
+    "properties": {"problems": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["where", "problem"],
+        "properties": {"where": {"type": "string"}, "problem": {"type": "string"}}}}},
+}
+
+
+TRANSLATION_PLAN_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["questions", "auto"],
+    "properties": {
+        "questions": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "where", "issue", "question", "options"],
+            "properties": {"id": {"type": "string"}, "where": {"type": "string"}, "issue": {"type": "string"},
+                           "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}}}},
+        "auto": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["where", "change"],
+            "properties": {"where": {"type": "string"}, "change": {"type": "string"}}}}},
+}
+
+
+async def translation_plan(texts: dict[str, str], language: str, source_language: str, context: dict) -> dict:
+    """Before a full translation: read the lesson and the teaching pages, find the learning points that only
+    work in the source language, and ask the author how each should work in the new one.
+    Returns {"questions": [{id, where, issue, question, options}], "auto": [{where, change}]}: questions only
+    where there is a real choice; obvious adaptations are listed in `auto` so the author sees them too."""
+    items = json.dumps([{"id": k, "text": v} for k, v in texts.items()
+                        if k.startswith(("learning.", "pages.", "finds."))], ensure_ascii=False, indent=1)
+    out = await ask(
+        f"This {source_language} children's book is about to get a full translation into {language}: every page, "
+        f"every game and every lesson, for a child who reads only {language}. Before anything is translated, "
+        "read its lesson and its teaching pages and find what only works in " + source_language + ": games or "
+        "rules that hinge on letters, sounds, spelling, rhyme, syllables, word length, alphabetical order or grammar "
+        "(articles, gender, plurals, verb forms, word order); a lesson that does not exist in " + language + " (for "
+        "example English a/an); fill-in answers, odd-one-out groups or matching pairs that would stop having exactly "
+        "one right answer; marked learning words whose rule no longer fits; things a " + language + "-speaking "
+        "child would not know (foods, holidays, money, measures, school years).\n\n"
+        "For each learning point that breaks AND has more than one sensible way to adapt it, ask the author one "
+        "question: `where` is the page (pages.<n> as in Teaching parts) or `learning`; `issue` is one plain "
+        f"sentence on what breaks in {language}; `question` asks what to do; `options` are 2-4 concrete choices, "
+        f"your recommendation first, each naming the new learning point in {language} with a short example "
+        "(e.g. \"Teach un/une instead (un chat, une pomme)\"). The pictures stay as they are, so never offer a "
+        "choice that needs a new picture. Ask at most 6 questions, the most important first; group pages that share "
+        "one decision into one question (`where` is then the first of them, or `learning`).\n"
+        "Put in `auto` each part that breaks but has one obvious fix, with one plain sentence on what will change. "
+        "Leave out everything that translates without trouble. Both lists may be empty. Write in plain English for "
+        "a non-specialist author, without linguistics terms.\n\n"
+        f"Teaching parts:\n{json.dumps(context, ensure_ascii=False, indent=1)}\n\nWords:\n{items}",
+        "You are a children's book translator and teacher. You plan translations of educational books so every "
+        "lesson and game still teaches something real in the new language, and you ask the author only what "
+        "really needs their choice.", TRANSLATION_PLAN_SCHEMA)
+    qs = [{**q, "id": q.get("id") or f"q{i + 1}", "options": [o for o in q.get("options") or [] if o.strip()][:4]}
+          for i, q in enumerate(out.get("questions") or []) if (q.get("question") or "").strip()][:6]
+    return {"questions": qs, "auto": [a for a in out.get("auto") or [] if (a.get("change") or "").strip()]}
+
+
+def _decisions(decisions: list[dict] | None) -> str:
+    rows = [f"- {d.get('where') or 'book'}: {d['question']} -> "
+            + ((d.get('answer') or '').strip() or "no answer: you decide") for d in decisions or [] if d.get("question")]
+    return ("\n\nThe author answered these questions before the translation. Follow every answer exactly, and "
+            "adapt every page it touches so the whole book agrees:\n" + "\n".join(rows)) if rows else ""
+
+
+async def translate_full(texts: dict[str, str], language: str, source_language: str, check,
+                         context: dict, view, decisions: list[dict] | None = None) -> dict:
+    """A full translation (the workflow is described in bookforge/translate.py).
+
+    `context` is translate.context(book): the lesson and the pages that teach or test something. Without
+    any, this is a plain translation. With some, Claude translates and adapts in one pass, `check` catches
+    broken structure, and a play-test (`view(translated)` is what the tester reads) catches games and lessons
+    that no longer work; each finding goes back to Claude, at most twice.
+    Returns {"texts", "adapted": [{where, change}], "unresolved": [{where, problem}]}."""
+    if not context:
+        return {"texts": await translate(texts, language, source_language, check), "adapted": [], "unresolved": []}
+    items = json.dumps([{"id": k, "text": v} for k, v in texts.items()], ensure_ascii=False, indent=1)
+    system = ("You are a children's book translator and teacher. You translate finished educational picture books "
+              "so they read as if they were written in the target language, and so every game and lesson works for "
+              "a child who reads only that language. Keep each page about as long as the original, because the "
+              "words must fit the same space on the page.")
+    prompt = (f"Make a full translation of this {source_language} children's book into {language}: every page, "
+              "every game and every lesson, the same book for a child who reads only " + language + ".\n\n"
+              "Rules:\n- Return every id exactly once, with its translated text.\n"
+              "- Keep line breaks, and keep each [[marked]] passage marked with [[ ]] around its translation "
+              "(the same number of marked passages per item).\n"
+              "- Character names: keep them, written the way readers of the target language would write them.\n"
+              "- Rhymes and wordplay: recreate the effect in the target language rather than translating literally.\n"
+              "- ids starting with finds. are short names of things to find in a picture; keep singular/plural "
+              "matching the number of things.\n\n"
+              "Adapting what teaches or tests (the parts under 'Teaching parts'): a word-for-word translation can "
+              "break them. For each one, ask whether it still works in " + language + ". It breaks when it hinges "
+              "on letters, sounds, spelling, rhyme, syllables, word length, alphabetical order, grammar (articles, "
+              "gender, plurals, verb forms, word order), idioms, or things a " + language + "-speaking child would "
+              "not know (foods, holidays, money, measures, school years). Watch especially for: a fill-in whose "
+              "answer is no longer the one right word for the blank; an odd-one-out group whose odd item no longer "
+              "stands out, or where another item now does; matching pairs that are no longer one-to-one; [[marked]] "
+              "words that no longer follow the lesson's marking rule; lesson and reference pages that state "
+              "something untrue of " + language + ".\n"
+              "- If it still works, translate it.\n"
+              "- If it would break, adapt it: rewrite it so it teaches the same skill at the same level in "
+              f"{language}, with the same number of items. The pictures are kept as they are, so an adapted item "
+              "must still fit its page's picture (choose words the picture shows, or that do not refer to it).\n"
+              "- If the lesson itself does not exist in " + language + " (for example English a/an), switch to the "
+              f"nearest lesson that does (for example un/une in French) and change learning.topic, learning.explain, "
+              "learning.marking and every teaching page so they agree.\n"
+              "- Change the story itself only where a marked passage requires it.\n"
+              "- In `adapted`, list every part you adapted rather than just translated: `where` is the page "
+              "(pages.<n>, as in Teaching parts) or `learning`, and `change` is one short plain sentence in "
+              "English for the book's author saying what you changed and why. Leave it empty if nothing needed it.\n\n"
+              f"Teaching parts:\n{json.dumps(context, ensure_ascii=False, indent=1)}{_decisions(decisions)}\n\n"
+              f"Items:\n{items}")
+    best = None
+    for attempt in range(3):
+        out = await ask(prompt, system, FULL_TRANSLATION_SCHEMA)
+        got = {i["id"]: i["text"] for i in out["items"] if i["id"] in texts}
+        errs = check(texts, got)
+        if errs:
+            prompt += ("\n\nYour previous answer had these problems, fix them and return every item again:\n- "
+                       + "\n- ".join(errs[:20]))
+            continue
+        problems = await playtest(view(got), language, source_language)
+        best = {"texts": got, "adapted": out.get("adapted") or [], "unresolved": problems}
+        if not problems or attempt == 2:
+            break
+        prompt += ("\n\nA teacher play-tested your translation and found these problems. Fix them (adapt the part "
+                   "if needed) and return every item and every adaptation again:\n- "
+                   + "\n- ".join(f"{p['where']}: {p['problem']}" for p in problems[:20]))
+    if best is None:
+        raise AuthorError("Claude's translation was incomplete: " + "; ".join(errs[:6]))
+    return best
+
+
+async def playtest(book_yaml: str, language: str, source_language: str) -> list[dict]:
+    """Play every game and read every lesson of a translated book as a child who reads only `language`.
+    Returns the real problems [{where, problem}], an empty list when everything works."""
+    system = (f"You are a {language}-speaking primary school teacher. You play-test children's activity books "
+              "before they are printed, and you only report what would really stop or mislead a child.")
+    prompt = (f"This book was just translated from {source_language} into {language}. Below are its lesson and "
+              "its activity pages (YAML, answers included; `picture` describes the page's illustration, which "
+              "cannot change). Do every game and read every lesson as a child who reads only " + language + ".\n\n"
+              "Report a problem only when:\n- a game has no correct answer, more than one, or the given answer is "
+              "wrong in " + language + ";\n- a game or rule only works in another language (letters, sounds, "
+              "rhyme, spelling, grammar);\n- a [[marked]] word does not follow the lesson's marking rule;\n"
+              "- a lesson states something untrue of " + language + ";\n- the child is asked to find or name "
+              "something the picture does not show;\n- words are left in another language.\n"
+              "Ignore style and taste. `where` is the page's `where` value, or `learning`. `problem` is one short "
+              "plain sentence in English. Return an empty list when everything works.\n\n"
+              f"```yaml\n{book_yaml}```")
+    out = await ask(prompt, system, PLAYTEST_SCHEMA)
+    return [p for p in out.get("problems") or [] if (p.get("problem") or "").strip()]
+
+
 TEMPLATE_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["name", "description", "sections"],
     "properties": {
