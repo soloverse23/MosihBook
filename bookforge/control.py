@@ -149,7 +149,8 @@ def page_info(project: Project) -> dict[int, dict]:
         text = "\n\n".join(manuscript(book, b) for b in pages) or None
         info[n] = {"proof": project.proofs / f"page-{n:03d}.png", "slot": sid, "text": text,
                    "book_page": pages[0] if len(pages) == 1 else None, "book_pages": pages,
-                   "lettered": bool(sid and slots[sid].lettering)}
+                   "lettered": bool(sid and slots[sid].lettering),
+                   "lettering": slots[sid].expected_text if sid and slots[sid].lettering else ""}
     return info
 
 
@@ -182,9 +183,32 @@ async def _check_batch(project: Project, pages: list[int], info: dict, language:
     return [i for i in out.get("issues", []) if i.get("page") in pages]
 
 
+def _has(words: str, text: str) -> bool:
+    return bool(words.strip()) and re.search(rf"(?<!\w){re.escape(words.strip())}(?!\w)", text or "") is not None
+
+
+def wrong_in_manuscript(issue: dict, lettering: str, asked: str = "") -> bool:
+    """Are the wrong words of a lettered picture the words book.yaml gives it? Then a redraw alone letters the
+    same mistake again: book.yaml is fixed first, and the picture is drawn from the new words. `asked` is the
+    fix Claude chose ("text" says so outright)."""
+    if not lettering:
+        return False
+    cur, new = (issue.get("current") or "").strip(), (issue.get("replace_with") or "").strip()
+    if cur and new and cur != new:
+        return _has(cur, lettering) and not _has(new, lettering)
+    return asked == "text"
+
+
+def lettering_of(project: Project, slot: str | None) -> str:
+    """The words book.yaml tells a picture to letter, as the book is now."""
+    s = next((x for x in plan(project.book) if x.id == slot), None) if slot else None
+    return s.expected_text if s and s.lettering else ""
+
+
 def _normalise(issue: dict, info: dict) -> dict:
     """Route the fix to something the studio can really do on that page."""
     p = info.get(issue["page"], {})
+    asked = issue.get("fix")
     fix = issue["fix"] if issue.get("fix") in FIXES else "layout"
     if fix != "margin" and (p.get("lettered") or (fix in ("text", "layout") and not p.get("text"))):
         fix = "image"            # its words are drawn into the picture: only a redraw changes them
@@ -192,10 +216,13 @@ def _normalise(issue: dict, info: dict) -> dict:
         fix = "layout"           # typeset words: the layout keeps them inside the margin, not the picture
     if fix == "image" and not p.get("slot"):
         fix = "text"             # a typeset page has no picture of its own to redraw
-    return {"page": issue["page"], "problem": issue["problem"].strip(), "current": (issue.get("current") or "").strip(),
-            "replace_with": (issue.get("replace_with") or "").strip(), "fix": fix,
-            "prompt": issue["prompt"].strip(), "slot": p.get("slot") if fix in ("image", "margin") else None,
-            "book_page": p.get("book_page"), "book_pages": p.get("book_pages") or []}
+    out = {"page": issue["page"], "problem": issue["problem"].strip(), "current": (issue.get("current") or "").strip(),
+           "replace_with": (issue.get("replace_with") or "").strip(), "fix": fix,
+           "prompt": issue["prompt"].strip(), "slot": p.get("slot") if fix in ("image", "margin") else None,
+           "book_page": p.get("book_page"), "book_pages": p.get("book_pages") or []}
+    # the picture letters what book.yaml says: when that is where the mistake is, the words are fixed there first
+    out["manuscript"] = fix == "image" and wrong_in_manuscript(out, p.get("lettering") or "", asked)
+    return out
 
 
 async def inspect(project: Project, progress=None) -> dict:
@@ -340,6 +367,16 @@ def _direct(current_yaml: str, issue: dict) -> str | None:
 def spec_field(pg) -> bool:
     """Does this book.yaml page hold game data the solutions page prints?"""
     return isinstance(pg, dict) and any(pg.get(f) for f in ("fill_in", "matching", "odd_one_out", "maze"))
+
+
+async def apply_manuscript(current_yaml: str, issue: dict, prompt: str, brief: dict | None = None) -> str:
+    """The book.yaml half of fixing a lettered picture whose words are wrong in the manuscript: the words are
+    corrected where book.yaml holds them, and the picture is drawn again from them afterwards."""
+    t = {**issue, "fix": "text"}
+    if out := _direct(current_yaml, t):
+        return out
+    return await apply_text(current_yaml, t, f"{issue['problem']} These words are lettered into the picture from "
+                            f"book.yaml, so correct them there (the picture is drawn again from them). {prompt}", brief)
 
 
 async def apply_text(current_yaml: str, issue: dict, prompt: str, brief: dict | None = None) -> str:

@@ -180,7 +180,7 @@ def issue_jobs(slug: str) -> dict[str, dict]:
     with _lock:
         for j in QUEUE.get(_key(slug), []):
             for iid in [*j.issues, *(t["issue"] for t in j.texts)]:
-                out[iid] = {"id": j.id, "status": j.status}
+                out[iid] = {"id": j.id, "status": j.status, "kind": j.kind}
     return out
 
 
@@ -357,7 +357,9 @@ def _mark(p: Project, issue_id: str, error: str | None) -> None:
 
 
 def _texts(job: Job, p: Project) -> None:
-    """Make the word and layout fixes one after another: each one rewrites book.yaml."""
+    """Make the word and layout fixes one after another: each one rewrites book.yaml. A fix whose words are
+    lettered into a picture (t["redraw"] = its slot) then queues that picture to be drawn from the new words:
+    the issue is fixed when the redraw is."""
     job.stages = [("write", f"Fixing the words ({len(job.texts)})" if len(job.texts) > 1 else "Fixing the words", 100)]
     job.enter("write")
     done = 0
@@ -369,11 +371,22 @@ def _texts(job: Job, p: Project) -> None:
         try:
             if not issue:
                 raise KeyError("the book was checked again meanwhile: this problem is gone")
-            text = asyncio.run(control.apply_text(state.read_yaml(job.slug), issue, t["prompt"],
-                                                      state.load_state(job.slug).get("brief")))
-            state.write_yaml(job.slug, text)
-            control.set_status(p, t["issue"], "applied", t["prompt"], error="")
-            job.log("  done")
+            brief = state.load_state(job.slug).get("brief")
+            if slot := t.get("redraw"):
+                now = control.lettering_of(Project(p.book_path), slot)
+                if issue.get("current") and issue.get("replace_with") and not control.wrong_in_manuscript(issue, now):
+                    job.log("  book.yaml already has the right words")   # fixed meanwhile by another fix
+                else:
+                    state.write_yaml(job.slug, asyncio.run(control.apply_manuscript(
+                        state.read_yaml(job.slug), issue, t["prompt"], brief)))
+                    job.log("  words fixed in book.yaml")
+                start(job.slug, "regen", slots=[slot], notes={slot: t["prompt"]}, issues={t["issue"]: slot})
+                job.log(f"  {slot}: queued to be drawn again with the new words")
+            else:
+                text = asyncio.run(control.apply_text(state.read_yaml(job.slug), issue, t["prompt"], brief))
+                state.write_yaml(job.slug, text)
+                control.set_status(p, t["issue"], "applied", t["prompt"], error="")
+                job.log("  done")
             done += 1
         except Exception as e:   # one fix that fails does not stop the others
             msg = str(e.args[0]) if isinstance(e, KeyError) and e.args else str(e)

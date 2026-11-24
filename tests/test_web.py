@@ -18,6 +18,11 @@ EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "picture-book" /
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
+    from bookforge.web import jobs
+    # every test's book is called "a-fox": jobs left in memory by an earlier test must not answer for this one
+    with jobs._lock:
+        jobs.JOBS.clear()
+        jobs.QUEUE.clear()
     monkeypatch.setattr(settings, "PATH", tmp_path / "home" / "settings.json")
     settings.save({"books_dir": str(tmp_path / "books"), "openai_api_key": "sk-test-1234567890abcd"})
 
@@ -577,3 +582,62 @@ def test_text_control_before_the_art(client, monkeypatch):
     monkeypatch.setattr(author, "ask", ask)
     r = client.post(f"/api/books/{slug}/textcheck/check").json()["report"]
     assert [i["status"] for i in r["issues"] if i["page"] == 3] == ["ignored"]
+
+
+def test_control_fixes_lettered_words_in_the_manuscript_before_the_redraw(client, monkeypatch):
+    """Words lettered into a picture come from book.yaml: when the mistake is there, a redraw alone would letter
+    it again. The fix corrects book.yaml first, then the picture is drawn from the new words."""
+    import json
+
+    import yaml
+
+    from bookforge import control
+    from bookforge.project import Project
+    from bookforge.web import jobs
+    data = yaml.safe_load(EXAMPLE.read_text())
+    data["images"]["text_in_art"] = True
+    slug = client.post("/api/books", json={"idea": "a fox"}).json()["slug"]
+    client.put(f"/api/books/{slug}/yaml", json={"yaml": yaml.safe_dump(data, allow_unicode=True)})
+    assert _wait(client, client.post(f"/api/books/{slug}/jobs/mock").json()["job"])["status"] == "done"
+    p = Project(state.book_dir(slug) / "book.yaml", mock=True)
+    info = control.page_info(p)
+    n = next(k for k, i in info.items() if i["slot"] == "p001")
+    assert "Willowmere" in info[n]["lettering"]
+
+    def issue(cur, new, fix="image"):
+        return control._normalise({"page": n, "problem": "A word is misspelled.", "current": cur,
+                                   "replace_with": new, "fix": fix, "prompt": f"Write {new}."}, info)
+    # the manuscript has the wrong word: fixed there first; the picture misspelling a right word: only a redraw
+    assert issue("Willowmere", "Willowmoor")["manuscript"] and issue("Willowmere", "Willowmoor", "text")["manuscript"]
+    assert not issue("Wilowmere", "Willowmere")["manuscript"]
+    assert issue("Willowmere", "Willowmoor")["fix"] == "image"
+
+    rep = {"checked": 0, "pages": len(info), "issues": [{**issue("Willowmere", "Willowmoor"), "id": "c001", "status": "open"}]}
+    control.report_path(Project(state.book_dir(slug) / "book.yaml")).write_text(json.dumps(rep))
+    drawn = []
+
+    def fake_run(project, only=None, bump=frozenset(), notes=None, drafts=None, log=print, progress=None):
+        drawn.append((set(only), control.lettering_of(project, "p001"), notes))
+        return {}
+    monkeypatch.setattr(jobs.generate, "run", fake_run)
+    told = []
+
+    async def revise(yaml_text, instruction, brief=None):  # the word is also on the back cover: Claude edits
+        told.append(instruction)
+        return yaml_text.replace("woods of Willowmere", "woods of Willowmoor", 1)
+    monkeypatch.setattr(author, "revise", revise)
+    assert client.post(f"/api/books/{slug}/control/c001/apply", json={}).status_code == 200
+    for _ in range(300):
+        js = client.get(f"/api/books/{slug}/jobs").json()["jobs"]
+        if not any(j["status"] in ("running", "queued") for j in js):
+            break
+        time.sleep(0.1)
+    kinds = {j["kind"]: j for j in js}
+    assert kinds["text"]["status"] == "done" and kinds["regen"]["status"] == "done"
+    assert "Willowmoor" in yaml.safe_load(state.read_yaml(slug))["pages"][0]["text"]
+    assert "page 1 of the `pages:` list" in told[0] and '"Willowmere" -> "Willowmoor"' in told[0]
+    # the picture was drawn from the corrected words, with the fix as its note
+    assert drawn == [({"p001"}, control.lettering_of(Project(state.book_dir(slug) / "book.yaml"), "p001"),
+                      {"p001": "Write Willowmoor."})] and "Willowmoor" in drawn[0][1]
+    got = client.get(f"/api/books/{slug}/control").json()["report"]["issues"][0]
+    assert got["status"] == "applied" and "error" not in got

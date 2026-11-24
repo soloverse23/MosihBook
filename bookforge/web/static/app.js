@@ -2275,7 +2275,7 @@ async function stepControl(host, b, slug) {
     const s = stat(i), locked = !!checking();
     let body;
     if (i.status === "applied") body = `<span class="badge ok">Fixed</span>`;
-    else if (s === "running") body = `<div class="ctl-state"><span class="spin"></span>${PAID_FIX.has(i.fix) ? "Redrawing the picture now" : "Claude is fixing the words now"} · progress is at the top</div>`;
+    else if (s === "running") body = `<div class="ctl-state"><span class="spin"></span>${i.job.kind === "text" ? `Claude is fixing the words now${i.manuscript ? ", then the picture is redrawn" : ""}` : "Redrawing the picture now"} · progress is at the top</div>`;
     else if (s === "queued") body = `<div class="ctl-state">${icon("clock")}Waiting in the queue <button class="btn sm ghost" data-unq="${i.id}">Remove</button></div>`;
     else body = `${i.error ? note("err", `<b>Not fixed:</b> ${esc(i.error)}`) : ""}
       <label class="ctl-pick" ${report.issues.filter((x) => x.page === i.page && x.status === "open" && !x.job).length > 1 ? "" : "hidden"}><input type="checkbox" data-pick="${i.id}" checked> Include in “Apply selected”</label>
@@ -2283,7 +2283,7 @@ async function stepControl(host, b, slug) {
       <div class="row gap2"><button class="btn primary sm" data-apply="${i.id}" ${locked ? "disabled" : ""}>${icon(PAID_FIX.has(i.fix) ? "sparkle" : "check")}${i.error ? "Try again" : "Apply fix"}${i.cost_usd ? ` · ~${money(i.cost_usd)}` : ""}</button>
         <button class="btn sm ghost" data-skip="${i.id}" ${locked ? "disabled" : ""}>Ignore</button></div>`;
     return `<div class="ctl-issue ${i.status} ${s ? "is-" + s : ""}" id="iss-${i.id}">
-      <div class="row gap2"><span class="badge ${PAID_FIX.has(i.fix) ? "accent" : "plain"}">${FIX_LABEL[i.fix]}</span>
+      <div class="row gap2"><span class="badge ${PAID_FIX.has(i.fix) ? "accent" : "plain"}" ${i.manuscript ? `title="The mistake is in the manuscript: it is corrected there first, then the picture is drawn with the new words"` : ""}>${i.manuscript ? "Fix the words, then redraw" : FIX_LABEL[i.fix]}</span>
         ${i.slot ? `<span class="faint xs" title="The name of this picture in Art &amp; build and in the progress panel">picture: ${esc(slotName({ id: i.slot }))}</span>` : ""}</div>
       <p class="ctl-problem">${esc(i.problem)}</p>
       ${i.replace_with ? `<p class="ctl-swap">${i.current ? `<s>${esc(i.current)}</s> → ` : ""}<b>${esc(i.replace_with)}</b></p>` : ""}${body}</div>`;
@@ -2383,7 +2383,8 @@ async function stepControl(host, b, slug) {
     const n = (f) => list.filter((i) => i.fix === f).length, pl = (k) => (k > 1 ? "s" : "");
     const parts = [n("image") ? `${n("image")} picture${pl(n("image"))} will be redrawn` : "",
       n("margin") ? `${n("margin")} picture${pl(n("margin"))} will be redrawn from their current picture, inside the 9.7 mm margin` : ""].filter(Boolean);
-    return `${parts.join("; ")}: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
+    const words = list.filter((i) => i.manuscript).length;
+    return `${words ? `The mistake${pl(words)} ${words > 1 ? "are" : "is"} in the manuscript: Claude corrects the words there first, then the picture is drawn with them.<br><br>` : ""}${parts.join("; ")}: about ${money(imageCost(list))}.<br><br>This uses the OpenAI image API and costs real money.`;
   };
 
   host.addEventListener("change", (e) => { const c = e.target.closest("[data-pick]"); if (c) refreshPage(c.closest(".ctl-card")); });

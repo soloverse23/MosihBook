@@ -744,6 +744,10 @@ def _queue_fixes(slug: str, items: list[dict]) -> list[str]:
         prompt = (it.get("prompt") or issue["prompt"]).strip()
         if not prompt:
             raise HTTPException(400, "write the fix first")
+        # lettered words that are wrong in book.yaml itself: a redraw would letter the same mistake again, so
+        # the words are fixed there first and the picture is drawn from them after (one job leads to the other)
+        wrong_words = issue["fix"] == "image" and issue.get("slot") and (
+            issue.get("manuscript") or control.wrong_in_manuscript(issue, control.lettering_of(p, issue["slot"])))
         # a redraw asked only to keep things inside the margin keeps the picture and fits it there instead
         fix = "margin" if issue["fix"] == "image" and margins.is_margin_request(prompt) and not issue.get("replace_with") \
             else issue["fix"]
@@ -752,6 +756,8 @@ def _queue_fixes(slug: str, items: list[dict]) -> list[str]:
             # a cut word in a table: the layout sizes the columns itself, so the rebuild below is the fix
             control.set_status(p, issue["id"], "applied", prompt, error="")
             rebuild = True
+        elif wrong_words:
+            texts.append({"issue": issue["id"], "prompt": prompt, "page": issue["page"], "redraw": issue["slot"]})
         elif fix == "margin":
             fit[issue["id"]] = issue["slot"]
         elif fix == "image":
@@ -759,7 +765,7 @@ def _queue_fixes(slug: str, items: list[dict]) -> list[str]:
             notes[issue["slot"]] = jobs._join(notes.get(issue["slot"]), prompt)
         else:
             texts.append({"issue": issue["id"], "prompt": prompt, "page": issue["page"]})
-    if (redraw or fit) and not settings.load().openai_api_key:
+    if (redraw or fit or any(t.get("redraw") for t in texts)) and not settings.load().openai_api_key:
         raise HTTPException(400, "add your OpenAI API key in Settings first")
     out = []
     try:
