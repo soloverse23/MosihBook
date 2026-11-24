@@ -18,6 +18,7 @@ from .base import Sheet, marked
 
 _SEP = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 BULLET = ("•", "-", "*", "–")
+MIN_TEXT = 9.5  # points: the smallest prose or list text of a learning page
 
 
 def _cells(line: str) -> list[str]:
@@ -28,13 +29,18 @@ def is_table_line(line: str) -> bool:
     return line.strip().startswith("|") and line.strip().count("|") >= 2
 
 
+def has_table(text: str) -> bool:
+    return any(is_table_line(x) for x in (text or "").splitlines())
+
+
 class TableBlock(Flowable):
     """A table that takes whatever width it is given: header row on the accent color, pronoun column
     in the accent, rows on alternating soft tints, cells wrapping instead of overflowing."""
 
     SIZE = 10        # points at scale 1
-    MIN_SIZE = 7.5   # points at scale 1: the font may shrink this far so every word fits its cell whole
-    PAD = 3          # points of cell padding left and right, at scale 1
+    MIN_SIZE = 8     # points, at any scale: the font may shrink this far so every word fits its cell whole
+    PAD = 5          # points of cell padding left and right, at scale 1
+    AIR = 1.3        # a table is set this much wider than its one-line cells, never across the whole page
 
     def __init__(self, sheet: Sheet, rows: list[list[str]], scale: float = 1.0):
         super().__init__()
@@ -42,13 +48,19 @@ class TableBlock(Flowable):
         n = max(len(r) for r in rows)
         self.rows = [r + [""] * (n - len(r)) for r in rows]
         self.n = n
-        self.max_w = 6.4
-        words, lines = self._measure(self.SIZE * scale)
-        # inches it would like (see shaped._natural): every cell on one line, when the page allows
-        self.want = min(self.max_w, sum(lines) / inch + 0.02)
+        self.size0 = max(self.SIZE * scale, self.MIN_SIZE)  # a smaller page scale never goes below MIN_SIZE
+        self.min_size = self.MIN_SIZE
+        words, lines = self._measure(self.size0)
         # inches it cannot go below: the longest word of each column, whole, at the smallest font
-        self.min_w = sum(self._measure(self.MIN_SIZE * scale)[0]) / inch + 0.02
+        self.min_w = sum(self._measure(self.min_size)[0]) / inch + 0.02
+        one_line = sum(lines) / inch + 0.02
+        # its measure: a two-column table of short words stays a compact table in the middle of the page,
+        # it is not stretched to the page's width with its words lost far apart
+        self.max_w = max(self.min_w, min(6.4, max(one_line * self.AIR, 2.4)))
+        # inches it would like (see shaped._natural): every cell on one line, when the page allows
+        self.want = min(self.max_w, one_line)
         self.spaceAfter = 10 * scale
+        self.hAlign = "CENTER"
 
     def _measure(self, size: float) -> tuple[list[float], list[float]]:
         """Per column, in points with padding: the widest single word, and the widest whole cell on one line."""
@@ -59,7 +71,7 @@ class TableBlock(Flowable):
             font = t.heading if i == 0 else t.body
             for j, c in enumerate(r):
                 plain = c.replace("[[", "").replace("]]", "")
-                for w in plain.split():
+                for w in re.split(r"[ \t\n]+", plain.strip()):  # a no-break space holds its words together
                     words[j] = max(words[j], stringWidth(w, font, size) + pad)
                 lines[j] = max(lines[j], stringWidth(plain, font, size) + pad)
         return words, lines
@@ -69,10 +81,10 @@ class TableBlock(Flowable):
         column holds its longest word whole; the room left goes first to the columns whose cells would
         otherwise wrap, then evenly. No word is ever cut inside a cell."""
         s = self.scale
-        size = self.SIZE * s
+        size = self.size0
         while True:
             words, lines = self._measure(size)
-            if sum(words) <= aw or size <= self.MIN_SIZE * s:
+            if sum(words) <= aw or size <= self.min_size:
                 break
             size -= 0.25 * s
         widths = list(words)
@@ -118,11 +130,12 @@ class TableBlock(Flowable):
         ]
         for i in range(1, len(data)):
             style.append(("BACKGROUND", (0, i), (-1, i), soft if i % 2 else Color(1, 1, 1, alpha=0.85)))
-        tab = Table(data, colWidths=widths)
+        tab = Table(data, colWidths=widths, repeatRows=1)
         tab.setStyle(TableStyle(style))
         return tab
 
     def wrap(self, aw, ah):
+        aw = min(aw, self.max_w * inch)  # poured into a wide frame, it keeps its own measure, centred
         self._t = self._table(aw)
         self.width, self.height = self._t.wrap(aw, ah)
         return self.width, self.height
@@ -130,18 +143,25 @@ class TableBlock(Flowable):
     def draw(self):
         self._t.drawOn(self.canv, 0, 0)
 
+    def split(self, aw, ah):
+        """Too tall for what is left of the page: it continues on the next one, its header row repeated."""
+        return self._table(min(aw, self.max_w * inch)).split(aw, ah)
+
 
 def learning_page(sheet: Sheet, text: str, scale: float = 1.0) -> list:
     """Reference text -> flowables: caption lines over tables, labels ("... :"), bullet lists, prose."""
+    from ..words import typeset
     t = sheet.theme
     color = sheet.mark_color
-    caption = sheet.style(13.5 * scale, font=t.heading, align=TA_CENTER, color=t.accent, leading=1.2)
+    text = typeset(text, t.language)  # French « » : ; ! ? never left alone at a line's end
+    # a child reads these: a smaller page scale never sets them below a readable size
+    caption = sheet.style(max(13.5 * scale, 11.5), font=t.heading, align=TA_CENTER, color=t.accent, leading=1.2)
     caption.spaceAfter = 6 * scale
-    label = sheet.style(11.5 * scale, font=t.heading, align=TA_CENTER, leading=1.2)
+    label = sheet.style(max(11.5 * scale, 10), font=t.heading, align=TA_CENTER, leading=1.2)
     label.spaceAfter = 4 * scale
-    prose = sheet.style(t.size * scale, align=TA_CENTER, leading=1.45)
+    prose = sheet.style(max(t.size * scale, MIN_TEXT), align=TA_CENTER, leading=1.45)
     prose.spaceAfter = 8 * scale
-    item = sheet.style(t.size * scale, align=TA_LEFT, leading=1.5)
+    item = sheet.style(max(t.size * scale, MIN_TEXT), align=TA_LEFT, leading=1.5)
     item.spaceAfter = 8 * scale
 
     lines = [l.rstrip() for l in text.strip().splitlines()]
@@ -165,7 +185,10 @@ def learning_page(sheet: Sheet, text: str, scale: float = 1.0) -> list:
                 items.append(marked(lines[k].strip().lstrip("•-*– ").strip(), color))
                 k += 1
             dot = f'<font color="{t.accent}">•</font>&nbsp;&nbsp;'
-            out.append(Paragraph("<br/>".join(dot + x for x in items), item))
+            para = Paragraph("<br/>".join(dot + x for x in items), item)
+            para.wrap(6.4 * inch, 1e6)  # a list is as wide as its longest line, centred as a block (shaped)
+            para.max_w = min(6.4, max(para.getActualLineWidths0() or [0]) / inch + 0.1)
+            out.append(para)
             continue
         nxt = next((lines[j] for j in range(k + 1, len(lines)) if lines[j].strip()), "")
         if is_table_line(nxt):

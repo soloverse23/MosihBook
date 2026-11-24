@@ -49,3 +49,25 @@ def prepare(src: Path, w_in: float, h_in: float, out_dir: Path,
         im = im.crop((round(im.width * crop[0]), 0, round(im.width * crop[1]), im.height))
     im.save(out, "JPEG", quality=93, dpi=(kdp.MIN_DPI, kdp.MIN_DPI), subsampling=0)
     return out, native_dpi
+
+
+def soften(path: Path, paper: str, out_dir: Path, edge: float = 0.1) -> Path:
+    """A vignette on the page's paper: its white background takes the paper's color (a multiply, so the
+    picture keeps its colors) and its edges fade out, so it never sits on the page as a white box."""
+    from PIL import ImageChops, ImageFilter
+    tag = hashlib.sha256(f"{path}{path.stat().st_mtime_ns}{paper}{edge}".encode()).hexdigest()[:16]
+    out = out_dir / f"{path.stem}-soft-{tag}.png"
+    if out.exists():
+        return out
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+    tint = Image.new("RGB", im.size, paper)
+    im = ImageChops.multiply(im, tint)
+    w, h = im.size
+    m = max(2, round(min(w, h) * edge))
+    mask = Image.new("L", (w, h), 0)
+    mask.paste(255, (m, m, w - m, h - m))
+    mask = mask.filter(ImageFilter.GaussianBlur(m / 2))
+    im.putalpha(mask)
+    im.save(out, "PNG", dpi=(kdp.MIN_DPI, kdp.MIN_DPI))
+    return out

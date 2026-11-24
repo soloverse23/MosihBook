@@ -32,6 +32,34 @@ class SpotArt(Flowable):
         self.sheet.image(self.src, ((self._aw / inch - self.w_in) / 2, 0.15, self.w_in, self.h_in))
 
 
+class Vignette(Flowable):
+    """A learning page's picture, set among its words by shaped.place: as wide as it is given (up to
+    `width_in`), its white background melted into the paper (Sheet.image soft)."""
+
+    def __init__(self, sheet: Sheet, src, width_in: float, aspect: float = STORY_SPOT_ASPECT):
+        super().__init__()
+        self.sheet, self.src, self.aspect = sheet, src, aspect
+        self.max_w = self.want = width_in
+        self.spaceAfter = 6
+        self.hAlign = "CENTER"  # poured into a frame, it sits in the middle
+
+    def wrap(self, aw, ah):
+        self.width = min(aw, self.max_w * inch)
+        self.height = self.width / self.aspect
+        return self.width, self.height
+
+    def draw(self):
+        c = self.sheet.c
+        if self.canv is not c:  # a trial layout on a scratch canvas: only its size mattered
+            return
+        # the canvas is translated to the flowable's origin; Sheet.image draws in page inches
+        x, y = c.absolutePosition(0, 0)
+        c.saveState()
+        c.translate(-x, -y)  # back to the page's origin, so the picture's record holds its real place
+        self.sheet.image(self.src, (x / inch, y / inch, self.width / inch, self.height / inch), soft=True)
+        c.restoreState()
+
+
 HEAD_SPACE = 0.34  # inches reserved at the top of the safe area for the running head
 
 
@@ -173,7 +201,10 @@ def _finds(project: Project) -> dict[str, list[str]]:
 
 
 BACK_SCALES = (1.0, 0.92, 0.85, 0.78, 0.72)
-BACK_KINDS = {"solutions", "copyright", "reference", "theme_intro"}  # set as a whole, centred: answers, editorial, lessons
+BACK_KINDS = {"solutions", "copyright", "reference", "theme_intro"}
+LEARNING_KINDS = {"reference", "theme_intro"}  # lessons: tables, lists, examples, maybe a picture
+# a learning page's picture, widest first: it gets smaller before the words do (inches)
+VIGNETTE_WIDTHS = (3.4, 2.8, 2.3, 1.8, 1.4)  # set as a whole, centred: answers, editorial, lessons
 
 
 def back_matter(sheet: Sheet, book, p: Page, scale: float = 1.0) -> list:
@@ -273,15 +304,25 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
         draw(sheet, interior, book)
         sheet.new_page()
 
-    def back_page(p, frame_art=frame_art) -> bool:
-        """Solutions / editorial mentions on one page, set inside the calm shape the art left (or the
-        text box on plain paper), shrinking a little if needed. False: it did not fit, pour it instead."""
+    def back_page(p, frame_art=frame_art, picture=None) -> bool:
+        """Solutions / editorial mentions / a lesson on one page, set inside the calm shape the art left (or
+        the text box on plain paper), shrinking a little if needed. False: it did not fit, pour it instead.
+
+        `picture`: a lesson's own art. A spot picture is set above the words and gets smaller before they do;
+        an opener fills the page and the words sit on a paper panel over its middle."""
         from ..imaging import calm
         end_page()
         safe = interior.safe_box(sheet.page_no)
         pw, ph = interior.page_w, interior.page_h
         art = None
-        if frame_art:
+        opener = picture is not None and p.illustration == "opener"
+        if opener:
+            sx, sy, sw, sh = safe
+            inset = 0.45
+            frame_art = None
+            shape = calm.rect_shape((sx + inset, sy + FOLIO_SPACE + inset, sw - 2 * inset,
+                                     sh - FOLIO_SPACE - 2 * inset), pw, ph)
+        elif frame_art:
             box, panel = frame_box(interior, sheet.page_no, frame_art)
             shape = calm.rect_shape(box, pw, ph) if panel else calm.shape_of(frame_art, pw, ph)
             art = None if panel else frame_art.name
@@ -292,26 +333,45 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
             kicker, title = split_chapter(p.chapter)
             head += ([Paragraph(spaced_caps(kicker), label)] if kicker else []) + \
                 [Paragraph(escape(title), heading), Ornament(t.accent)]
+        spot = picture is not None and not opener
+        widths = VIGNETTE_WIDTHS if spot else (None,)
+
+        def flow_at(scale, pic_w):
+            pic = [Vignette(sheet, picture, pic_w)] if pic_w else []
+            return head + pic + back_matter(sheet, book, p, scale)
+
         # draw on a scratch canvas first: the page is only drawn once a scale fits
+        fit = None
         for scale in BACK_SCALES:
-            flow = head + back_matter(sheet, book, p, scale)
-            probe = Sheet(sheet.path, sheet.page_size, sheet.prepared_dir, sheet.theme)
-            if shaped.place(probe, flow, shape, safe, art=art):
+            for pic_w in widths:
+                probe = Sheet(sheet.path, sheet.page_size, sheet.prepared_dir, sheet.theme)
+                probe.mark_color = sheet.mark_color
+                if shaped.place(probe, flow_at(scale, pic_w), shape, safe, art=art):
+                    fit = scale, pic_w
+                    break
+            if fit:
                 break
-        else:
+        if fit is None:
             return False
+        scale, pic_w = fit
         if p.chapter:
             state["chapter"] = split_chapter(p.chapter)[1]
         sheet.mark(state["n"])
-        if frame_art:
+        if opener:  # the panel hugs the words that were placed on the probe
+            boxes = [r["box"] for r in probe.records["text"]]
+            x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
+            sheet.image(picture, (0, 0, pw, ph))
+            sheet.panel((x0 - 0.3, y0 - 0.3, x1 - x0 + 0.6, y1 - y0 + 0.6))
+        elif frame_art:
             sheet.image(frame_art, (0, 0, pw, ph))
             if art is None:
                 sheet.panel(frame_panel(frame_box(interior, sheet.page_no, frame_art)[0], interior))
         else:
             sheet.paper()
-        shaped.place(sheet, head + back_matter(sheet, book, p, scale), shape, safe, art=art)
+        shaped.place(sheet, flow_at(scale, pic_w), shape, safe, art=art)
         if book.page_numbers:
-            sheet.folio(interior, on_art=bool(frame_art))
+            sheet.folio(interior, on_art=bool(frame_art) or opener)
         sheet.new_page()
         return True
 
@@ -373,6 +433,11 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 sheet.folio(interior, on_art=True)
             sheet.new_page()
             continue
+        if p.kind in LEARNING_KINDS and p.prompt and src.exists() and \
+                back_page(p, frame_art, picture=src):  # a lesson and its picture, measured as one page
+            continue
+        if p.kind in LEARNING_KINDS and p.prompt and p.illustration == "opener" and tables.has_table(p.text):
+            p = p.model_copy(update={"illustration": "spot"})  # too much for a panel: picture above, lesson poured
         if p.prompt and p.illustration == "opener":
             end_page()
             if p.chapter:
@@ -398,7 +463,10 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 flow.append(Paragraph(spaced_caps(kicker), label))
             flow += [Paragraph(escape(title), heading), Ornament(t.accent)]
         if p.prompt and p.illustration == "spot":
-            flow.append(SpotArt(sheet, src, text_box()[2] * 0.72))
+            if p.kind in LEARNING_KINDS:
+                flow.append(Vignette(sheet, src, VIGNETTE_WIDTHS[-1]))
+            else:
+                flow.append(SpotArt(sheet, src, text_box()[2] * 0.72))
         if p.kind in BACK_KINDS:  # too long for one page: it flows on, same look, at the smallest size
             pour(flow + back_matter(sheet, book, p, BACK_SCALES[-1]))
             continue

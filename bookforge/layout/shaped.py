@@ -38,7 +38,8 @@ def _stack(flowables, shape: Shape, cx: float, top: float, bottom: float, max_w:
     for f in flowables:
         cap = getattr(f, "max_w", max_w)  # a block may ask for its own measure (a maze card, a wide table)
         # a block may also have a hard floor (a table: its longest words whole); it never goes narrower
-        floor = max(MIN_W, getattr(f, "min_w", 0))
+        # (a block that asks for less than MIN_W, a short list, is never asked to be wider than itself)
+        floor = max(min(MIN_W, cap), getattr(f, "min_w", 0))
         need = max(floor, _natural(f, cap) * 0.97) if strict else floor
         w = cap
         while True:  # where the shape is too narrow (the tip of an oval), move down

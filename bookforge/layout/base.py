@@ -157,18 +157,21 @@ class Sheet:
         self.records["blank"].append(self.page_no)
 
     def image(self, src: Path, box: Box, crop: tuple[float, float] | None = None,
-              fit_size: tuple[float, float] | None = None, radius: float = 0) -> None:
+              fit_size: tuple[float, float] | None = None, radius: float = 0, soft: bool = False) -> None:
         """Draw art into `box`. `fit_size`+`crop` handle a spread cut across two pages;
-        `radius` clips the art to a rounded rectangle."""
+        `radius` clips the art to a rounded rectangle; `soft` sets a vignette into the paper (fit.soften)."""
         x, y, w, h = box
         fw, fh = fit_size or (w, h)
         path, dpi = prepare(src, fw, fh, self.prepared_dir, crop)
+        if soft:
+            from ..imaging.fit import soften
+            path = soften(path, self.theme.paper, self.prepared_dir)
         self.c.saveState()
         if radius:
             clip = self.c.beginPath()
             clip.roundRect(x * inch, y * inch, w * inch, h * inch, radius * inch)
             self.c.clipPath(clip, stroke=0, fill=0)
-        self.c.drawImage(str(path), x * inch, y * inch, w * inch, h * inch)
+        self.c.drawImage(str(path), x * inch, y * inch, w * inch, h * inch, mask="auto" if soft else None)
         self.c.restoreState()
         # where the picture sits (inches from the page's bottom-left): the margin fit (imaging.margins) uses it
         self.records["images"].append({"page": self.page_no, "src": src.name, "native_dpi": round(dpi),

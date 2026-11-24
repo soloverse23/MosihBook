@@ -296,6 +296,8 @@ class Book(BaseModel):
         """Are this page's words drawn into its illustration by the image model?"""
         if page.kind in TYPESET_KINDS or page.kind in UNLETTERED_KINDS or page.drawn_activity:
             return False
+        if any(x.strip().startswith("|") and x.count("|") >= 2 for x in page.text.splitlines()):
+            return False  # an image model cannot draw a table: it is typeset (layout.tables)
         on = self.images.text_in_art if page.text_in_art is None else page.text_in_art
         return bool(on and self.type != "comic" and page.prompt and (page.text.strip() or page.chapter))
 

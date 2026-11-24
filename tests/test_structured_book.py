@@ -397,3 +397,51 @@ def test_translation_progress_follows_the_answer_as_it_is_written(monkeypatch):
     assert seen[-1]["items_done"] == len(texts) and all(u["state"] == "done" for u in seen[-1]["units"])
     p.done("new-book", {"reused": []})
     assert p.view()["percent"] == 100 and p.view()["result"]["slug"] == "new-book"
+
+
+VERB_TABLE = """5 more verbs from the story! Look at the endings.
+
+| I / you / we / they | he / she / it |
+|---|---|
+| love | loves |
+| find | finds |
+| fall | falls |
+| search | searches |
+| fly | flies |
+
+Add -s: most verbs just add -s: loves, finds, falls.
+Add -es: after ch, sh, s, x or o, add -es: search → searches.
+Add -ies: after a consonant + y, change y to i and add -es: fly → flies.
+Watch out: a name or a thing counts as he, she or it: Zigooli jumps, the hat flies."""
+
+
+@pytest.mark.parametrize("lettered,illustration", [(True, "spot"), (False, "spot"), (True, "opener")])
+def test_lesson_with_a_picture_and_a_table_is_laid_out_as_one_readable_page(tmp_path, lettered, illustration):
+    """A reference page with a table and its own picture was poured at the smallest scale: a 5pt table
+    stretched across the page under a white picture box. Now the picture shrinks before the words, the
+    table keeps its own measure and no text goes below a readable size; the page is never lettered."""
+    import pypdfium2 as pdfium
+    from bookforge.layout import tables
+    raw = structured_book(lettered)
+    i = next(k for k, pg in enumerate(raw["pages"]) if pg["kind"] == "reference")
+    raw["pages"][i].update(text=VERB_TABLE, prompt="a laughing cloud", illustration=illustration)
+    (tmp_path / "book.yaml").write_text(yaml.safe_dump(raw, allow_unicode=True))
+    p = Project(tmp_path / "book.yaml", mock=True)
+    assert not p.book.lettered(p.book.pages[i])
+    generate.run(p)
+    m = build_interior(p)
+    assert m["pages"] == 40
+    n = i + 1
+    text = pdfium.PdfDocument(str(p.build / "interior.pdf"))[n - 1].get_textpage().get_text_range()
+    assert "searches" in text and "|" not in text
+    # the picture is on that page, inside the page and clear of every block of words
+    pics = [r["box"] for r in m["images"] if r["page"] == n and r["src"] == f"p{n:03d}.png"]
+    assert pics
+    if illustration == "spot":
+        x, y, w, h = pics[0]
+        words = [t["box"] for t in m["text"] if t["page"] == n and t["box"][3] != round(h, 4)]
+        assert all(b[1] + b[3] <= y + 1e-3 or b[1] >= y + h - 1e-3 for b in words)
+    from bookforge.layout.base import Sheet, theme_for
+    sheet = Sheet(tmp_path / "x.pdf", (8.5, 8.5), tmp_path, theme_for(p.book))
+    table = next(f for f in tables.learning_page(sheet, VERB_TABLE, 0.72) if isinstance(f, tables.TableBlock))
+    assert table.size0 >= table.MIN_SIZE and table.max_w < 4  # two short columns stay a compact table
