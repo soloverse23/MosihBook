@@ -218,7 +218,7 @@ def _with_images(prompt: str, images):
     return gen()
 
 
-async def _ask_api(key: str, model: str, prompt: str, system: str, schema: dict | None, images) -> str:
+async def _ask_api(key: str, model: str, prompt: str, system: str, schema: dict | None, images, on_text=None) -> str:
     """One turn on the Claude API with this studio's (or account's) own key. Streams, because a whole
     book.yaml is a long answer."""
     import anthropic
@@ -234,12 +234,12 @@ async def _ask_api(key: str, model: str, prompt: str, system: str, schema: dict 
         try:  # on a safety decline the API retries on a fallback model in the same call
             async with client.beta.messages.stream(**req, betas=["server-side-fallback-2026-07-01"],
                                                    fallbacks="default") as stream:
-                msg = await stream.get_final_message()
+                msg = await _follow(stream, on_text)
         except anthropic.BadRequestError as e:
             if "fallback" not in str(e).lower():
                 raise
             async with client.messages.stream(**req) as stream:  # account without the fallback beta
-                msg = await stream.get_final_message()
+                msg = await _follow(stream, on_text)
     except anthropic.AuthenticationError as e:
         raise AuthorError("Anthropic rejected the API key. Check it in Settings > Claude.") from e
     except anthropic.PermissionDeniedError as e:
@@ -258,20 +258,31 @@ async def _ask_api(key: str, model: str, prompt: str, system: str, schema: dict 
     return "".join(b.text for b in msg.content if b.type == "text")
 
 
-async def ask(prompt: str, system: str, schema: dict | None = None, images=()):
+async def _follow(stream, on_text):
+    """The final message of an API stream; `on_text(text so far)` sees the answer grow as it is written."""
+    if on_text:
+        acc = ""
+        async for piece in stream.text_stream:
+            acc += piece
+            on_text(acc)
+    return await stream.get_final_message()
+
+
+async def ask(prompt: str, system: str, schema: dict | None = None, images=(), on_text=None):
     """One Claude turn with no tools. Returns text, or the parsed object when `schema` is given.
-    `images` are local image files shown to Claude with the prompt.
+    `images` are local image files shown to Claude with the prompt. `on_text(text so far)` is called while the
+    answer is written (a long translation shows how far it got).
 
     With an Anthropic API key (always the case for accounts on a server) it calls the Claude API
     directly; otherwise it runs on the Claude Code login of this computer (claude-agent-sdk)."""
     s = settings.load()
     if s.anthropic_api_key:
-        text = await _ask_api(s.anthropic_api_key, s.claude_model, prompt, system, schema, images)
+        text = await _ask_api(s.anthropic_api_key, s.claude_model, prompt, system, schema, images, on_text)
         return json.loads(_fenced(text, "json")) if schema else text
     if settings.current_user.get():
         raise AuthorError("Connect Claude first: add your Anthropic API key in Settings > Claude.")
     try:
-        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
+        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, StreamEvent, TextBlock, query
     except ImportError as e:
         raise AuthorError("Claude isn't available on this server (claude-agent-sdk is not installed; it is left "
                           "out of the Vercel build). Run MosiBooks on your own computer to write books with Claude.") from e
@@ -282,11 +293,19 @@ async def ask(prompt: str, system: str, schema: dict | None = None, images=()):
         system_prompt=system, model=s.claude_model, tools=[], setting_sources=[],
         max_turns=3 if schema else 1,
         output_format={"type": "json_schema", "schema": schema} if schema else None,
+        include_partial_messages=bool(on_text),
     )
-    text, result = [], None
+    text, result, partial = [], None, ""
     try:
         async for msg in query(prompt=_with_images(prompt, images) if images else prompt, options=options):
-            if isinstance(msg, AssistantMessage):
+            if isinstance(msg, StreamEvent):
+                # the answer as it is written: plain text, or the structured output's JSON
+                delta = (msg.event or {}).get("delta") or {}
+                piece = delta.get("text") or delta.get("partial_json") or ""
+                if piece and on_text:
+                    partial += piece
+                    on_text(partial)
+            elif isinstance(msg, AssistantMessage):
                 text += [b.text for b in msg.content if isinstance(b, TextBlock)]
             elif isinstance(msg, ResultMessage):
                 result = msg
@@ -556,8 +575,14 @@ TRANSLATION_SCHEMA = {
 }
 
 
-async def translate(texts: dict[str, str], language: str, source_language: str, check) -> dict[str, str]:
-    """Translate a finished book's words. `check(original, translated)` lists problems; one retry fixes them."""
+def _no_progress(event: str, **info) -> None:
+    pass
+
+
+async def translate(texts: dict[str, str], language: str, source_language: str, check, progress=None) -> dict[str, str]:
+    """Translate a finished book's words. `check(original, translated)` lists problems; one retry fixes them.
+    `progress(event, **info)` hears what it is doing (see translate_full)."""
+    progress = progress or _no_progress
     items = json.dumps([{"id": k, "text": v} for k, v in texts.items()], ensure_ascii=False, indent=1)
     system = ("You are a children's book translator. You translate finished picture books so they read as if "
               "they were written in the target language: natural, warm, rhythmic and age-appropriate, never stiff. "
@@ -573,11 +598,14 @@ async def translate(texts: dict[str, str], language: str, source_language: str, 
               "- learning.marking is the rule for how marked words are chosen: adapt it to the target language.\n\n"
               f"Items:\n{items}")
     for attempt in range(2):
-        out = await ask(prompt, system, TRANSLATION_SCHEMA)
+        progress("translate", attempt=attempt)
+        out = await ask(prompt, system, TRANSLATION_SCHEMA,
+                        on_text=lambda t, a=attempt: progress("text", attempt=a, text=t))
         got = {i["id"]: i["text"] for i in out["items"] if i["id"] in texts}
         errs = check(texts, got)
         if not errs:
             return got
+        progress("redo", attempt=attempt, problems=len(errs))
         prompt += ("\n\nYour previous answer had these problems, fix them and return every item again:\n- "
                    + "\n- ".join(errs[:20]))
     raise AuthorError("Claude's translation was incomplete: " + "; ".join(errs[:6]))
@@ -656,16 +684,22 @@ def _decisions(decisions: list[dict] | None) -> str:
 
 
 async def translate_full(texts: dict[str, str], language: str, source_language: str, check,
-                         context: dict, view, decisions: list[dict] | None = None) -> dict:
+                         context: dict, view, decisions: list[dict] | None = None, progress=None) -> dict:
     """A full translation (the workflow is described in bookforge/translate.py).
 
     `context` is translate.context(book): the lesson and the pages that teach or test something. Without
     any, this is a plain translation. With some, Claude translates and adapts in one pass, `check` catches
     broken structure, and a play-test (`view(translated)` is what the tester reads) catches games and lessons
     that no longer work; each finding goes back to Claude, at most twice.
-    Returns {"texts", "adapted": [{where, change}], "unresolved": [{where, problem}]}."""
+    Returns {"texts", "adapted": [{where, change}], "unresolved": [{where, problem}]}.
+
+    `progress(event, **info)` hears each step, for the progress shown while it works: "translate" (a pass
+    starts, `attempt`), "text" (the answer so far, `text`), "redo" (a pass had `problems` and is done again),
+    "playtest" (the teacher plays the games) and "fix" (the play-test found `problems`)."""
+    progress = progress or _no_progress
     if not context:
-        return {"texts": await translate(texts, language, source_language, check), "adapted": [], "unresolved": []}
+        return {"texts": await translate(texts, language, source_language, check, progress),
+                "adapted": [], "unresolved": []}
     items = json.dumps([{"id": k, "text": v} for k, v in texts.items()], ensure_ascii=False, indent=1)
     system = ("You are a children's book translator and teacher. You translate finished educational picture books "
               "so they read as if they were written in the target language, and so every game and lesson works for "
@@ -704,17 +738,22 @@ async def translate_full(texts: dict[str, str], language: str, source_language: 
               f"Items:\n{items}")
     best = None
     for attempt in range(3):
-        out = await ask(prompt, system, FULL_TRANSLATION_SCHEMA)
+        progress("translate", attempt=attempt)
+        out = await ask(prompt, system, FULL_TRANSLATION_SCHEMA,
+                        on_text=lambda t, a=attempt: progress("text", attempt=a, text=t))
         got = {i["id"]: i["text"] for i in out["items"] if i["id"] in texts}
         errs = check(texts, got)
         if errs:
+            progress("redo", attempt=attempt, problems=len(errs))
             prompt += ("\n\nYour previous answer had these problems, fix them and return every item again:\n- "
                        + "\n- ".join(errs[:20]))
             continue
+        progress("playtest", attempt=attempt)
         problems = await playtest(view(got), language, source_language)
         best = {"texts": got, "adapted": out.get("adapted") or [], "unresolved": problems}
         if not problems or attempt == 2:
             break
+        progress("fix", attempt=attempt, problems=len(problems))
         prompt += ("\n\nA teacher play-tested your translation and found these problems. Fix them (adapt the part "
                    "if needed) and return every item and every adaptation again:\n- "
                    + "\n- ".join(f"{p['where']}: {p['problem']}" for p in problems[:20]))

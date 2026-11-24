@@ -89,7 +89,7 @@ def test_each_account_has_its_own_keys_books_and_templates(server):
 def test_claude_uses_the_accounts_own_api_key(server, monkeypatch):
     seen = {}
 
-    async def fake_api(key, model, prompt, system, schema, images):
+    async def fake_api(key, model, prompt, system, schema, images, on_text=None):
         seen["key"] = key
         return '```json\n{"questions": [{"id": "hero", "question": "Who?"}]}\n```'
     monkeypatch.setattr(author, "_ask_api", fake_api)

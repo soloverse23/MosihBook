@@ -631,22 +631,122 @@ async function runTranslate(slug, language, btn) {
     answers = await translationQuestions(plan, language);
     if (!answers) return;
   }
-  toast(`Claude is translating into ${language} and checking every game still works. This takes a minute or two.`);
-  const r = await busy(btn, "Translating…", () => api("POST", `/api/books/${slug}/translate`, { language, answers }));
-  if (!r) return;
-  const changed = r.adaptation?.changes?.length || 0;
-  const adapted = changed ? ` ${changed} part${changed > 1 ? "s" : ""} adapted to work in ${language}.` : "";
-  if (!r.redraw.length) {
-    await api("POST", `/api/books/${r.slug}/jobs/build`).catch((e) => toast(e.message, true));
-    toast(`Translated. All ${r.reused.length} pictures reused, laying out the book now.${adapted}`);
-  } else {
-    toast(`Translated.${adapted} ${r.reused.length} pictures reused. ${r.redraw.length} have the words drawn into them and need redrawing (about ${money(r.redraw_cost_usd)}).`);
+  const win = translationWindow(slug, language);
+  let r;
+  try { r = await api("POST", `/api/books/${slug}/translate`, { language, answers }); }
+  catch (e) { win.fail(e.message); return; }
+  if (!r.redraw.length) await api("POST", `/api/books/${r.slug}/jobs/build`).catch((e) => toast(e.message, true));
+  win.finish(r);
+}
+
+// The translation's progress, live: how far it got, the step it is on, which page Claude is translating and the
+// last line it wrote. It can be hidden to a small pill in the corner; once done it offers the new book.
+function translationWindow(slug, language) {
+  let root = document.getElementById("tr-root");
+  if (!root) { root = document.createElement("div"); root.id = "tr-root"; document.body.append(root); }
+  const title = document.querySelector(`[data-tr="${CSS.escape(slug)}"]`)?.dataset.title;
+  let p = null, shown = 2, ended = false, hidden = false, polling = false, timer, last = "";
+  const t0 = Date.now();
+  const clock = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  const elapsed = () => (ended && p ? p.elapsed : Math.round((Date.now() - t0) / 1000));
+  const stepIcon = (st) => st === "done" ? icon("check") : st === "now" ? `<span class="spin"></span>` : st === "failed" ? icon("x") : "";
+
+  function render() {
+    const failed = p?.step === "failed", done = p?.step === "done", res = p?.result;
+    if (hidden) {
+      last = "";
+      root.innerHTML = `<button class="tr-pill ${done ? "done" : failed ? "failed" : ""}" id="tr-show">
+        ${done ? icon("check") : failed ? icon("alert") : `<span class="spin"></span>`}
+        <b class="num">${done ? `${esc(language)} edition ready` : failed ? "Translation stopped" : `${Math.round(shown)}%`}</b>
+        <span class="tr-pill-note">${done || failed ? "Show" : esc(p?.note || `Translating into ${language}`)}</span></button>`;
+      $("#tr-show", root).onclick = () => { hidden = false; render(); };
+      return;
+    }
+    const units = p?.units || [];
+    const doneUnits = units.filter((u) => u.state === "done").length;
+    const a = res?.adaptation || {};
+    const head = done ? `${icon("check")}<span>“${esc(res.title || title || "")}” is ready in ${esc(language)}</span>`
+      : failed ? `${icon("alert")}<span>The translation stopped</span>`
+      : `${icon("globe")}<span>Translating${title ? ` “${esc(title)}”` : ""} into ${esc(language)}</span>`;
+    const pct = done ? 100 : Math.round(shown);
+    const html = `<div class="backdrop tr-back"><div class="modal wide tr-win ${done ? "is-done" : failed ? "is-failed" : ""}" role="dialog" aria-modal="true" aria-labelledby="tr-t">
+      <div class="mb">
+        <div class="row between"><h2 id="tr-t" class="tr-h">${head}</h2><span class="faint xs num" id="tr-clock"></span></div>
+        <div class="tr-meter"><b class="num" id="tr-pct"></b>
+          <div class="progress ${done ? "done" : failed ? "failed" : ""}"><i id="tr-bar"></i></div></div>
+        ${failed ? note("err", esc(p.error || "Something went wrong."))
+          : done ? "" : `<div class="tr-now"><span class="spin"></span><span>${esc(p?.note || `Starting the translation into ${language}`)}</span></div>`}
+        <ol class="tr-steps">${(p?.steps || [{ label: "Translate every page", state: failed ? "failed" : "now" }]).map((st) =>
+          `<li class="${st.state}"><span class="tr-dot">${stepIcon(st.state)}</span>${esc(st.label)}</li>`).join("")}</ol>
+        ${units.length ? `<div class="stack tight"><div class="row between"><span class="label">Pages</span>
+            <span class="faint xs num">${doneUnits} of ${units.length} translated${p.pass > 1 && !done ? ` · pass ${p.pass}` : ""}</span></div>
+          <div class="tr-map">${units.map((u) => `<span class="${u.state}" title="${esc(u.label)}">${esc(u.short)}</span>`).join("")}</div></div>` : ""}
+        ${!done && !failed && p?.last ? `<div class="tr-last"><span class="label">Just translated</span><p dir="auto">${unmark(p.last)}</p></div>` : ""}
+        ${done ? `<ul class="tr-sum small">
+            <li>${icon("image")}<span>${res.redraw.length ? `${res.reused.length} pictures reused · ${res.redraw.length} have words drawn in and need redrawing (about ${money(res.redraw_cost_usd)})`
+              : `All ${res.reused.length} pictures reused · laying out the book now`}</span></li>
+            ${a.changes?.length ? `<li>${icon("wand")}<span>${a.changes.length} part${a.changes.length > 1 ? "s" : ""} adapted to work in ${esc(language)} (see “What was adapted” on the book)</span></li>` : ""}</ul>
+          ${a.warnings?.length ? note("warn", `<b>Check before publishing</b>: Claude could not make these work in ${esc(language)}.<ul class="tr-warn">${
+            a.warnings.map((w) => `<li><span><b>${esc(w.where)}</b>: ${unmark(w.text)}</span></li>`).join("")}</ul>`) : ""}` : ""}
+      </div>
+      <div class="mf">${done ? `<button type="button" class="btn" data-close>Close</button>
+          <button type="button" class="btn primary" id="tr-open">${icon("book")}Open the new book</button>`
+        : failed ? `<button type="button" class="btn primary" data-close>Close</button>`
+        : `<span class="faint xs tr-hint">You can keep working: the translation goes on in the background.</span>
+           <button type="button" class="btn" id="tr-hide">Hide</button>`}</div></div></div>`;
+    // only what changed is redrawn: the bar, the percent and the clock move in place
+    if (html !== last) {   // after the first draw, a redraw doesn't fade the window in again
+      root.innerHTML = last ? html.replace('class="backdrop tr-back"', 'class="backdrop tr-back still"') : html;
+      last = html; wire(res);
+    }
+    $("#tr-pct", root).textContent = `${pct}%`;
+    $("#tr-bar", root).style.width = `${pct}%`;
+    $("#tr-clock", root).textContent = clock(elapsed());
   }
-  location.hash = `#/book/${r.slug}/art`;
-  // only what Claude could not fix interrupts; the list of changes waits behind a button on the book
-  if (r.adaptation?.warnings?.length) await modal({ title: `Check before publishing in ${language}`, confirm: "OK", cancel: false,
-    body: `Claude could not make these work in ${language}. Fix them in the text, or ignore them on the Publish page.`,
-    fields: `<ul class="small">${r.adaptation.warnings.map((w) => `<li><b>${esc(w.where)}</b>: ${unmark(w.text)}</li>`).join("")}</ul>` });
+  function wire(res) {
+    $("#tr-hide", root)?.addEventListener("click", hide);
+    $$("[data-close]", root).forEach((b) => (b.onclick = close));
+    $("#tr-open", root)?.addEventListener("click", () => { ended = false; close(); location.hash = `#/book/${res.slug}/art`; });
+    $(".tr-back", root).onclick = (e) => { if (e.target.classList.contains("tr-back")) (ended ? close() : hide()); };
+  }
+  const hide = () => { hidden = true; render(); };
+  // closing after it finished redraws the page behind, so the library shows the new book
+  const close = () => { clearInterval(timer); root.innerHTML = ""; document.removeEventListener("keydown", onKey); if (ended) route(); };
+  const onKey = (e) => { if (e.key === "Escape" && !hidden && !document.querySelector("#modal-root .backdrop")) (ended ? close() : hide()); };
+  document.addEventListener("keydown", onKey);
+
+  // ask the server each second; between answers the bar creeps toward where the current step ends
+  async function tick() {
+    if (ended) return;
+    if (!polling) {
+      polling = true;
+      try { const v = await api("GET", `/api/books/${slug}/translate/progress`); if (!ended && v.step !== "done" && v.step !== "failed") p = v; } catch {}
+      polling = false;
+    }
+    if (ended) return;
+    const target = p ? Math.max(p.percent, shown + (p.cap - shown) * 0.04) : Math.min(shown + 0.3, 4);
+    shown = Math.min(99, Math.max(shown, target));
+    render();
+  }
+  render();
+  timer = setInterval(tick, 1000);
+  tick();
+  return {
+    finish(r) {
+      ended = true; clearInterval(timer);
+      p = { ...(p || {}), step: "done", percent: 100, elapsed: Math.round((Date.now() - t0) / 1000), result: r,
+        steps: (p?.steps || []).map((s) => ({ ...s, state: "done" })), units: (p?.units || []).map((u) => ({ ...u, state: "done" })) };
+      render();
+    },
+    fail(msg) {
+      ended = true; clearInterval(timer);
+      const at = (p?.steps || []).findIndex((s) => s.state === "now");
+      p = { ...(p || {}), step: "failed", error: msg, elapsed: Math.round((Date.now() - t0) / 1000),
+        steps: (p?.steps || []).map((s, i) => ({ ...s, state: i === at ? "failed" : s.state })) };
+      hidden = false;
+      render();
+    },
+  };
 }
 
 // Claude quotes marked learning words with their [[ ]] marks: show them in bold, as the reader sees them

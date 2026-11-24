@@ -110,7 +110,7 @@ def test_written_book_gets_structure_and_learning(monkeypatch):
     book = structured_book(True)
     del book["sections"], book["learning"]
 
-    async def fake_ask(prompt, system, schema=None, images=()):
+    async def fake_ask(prompt, system, schema=None, images=(), on_text=None):
         assert "[[double brackets]]" in system
         return "```yaml\n" + yaml.safe_dump(book, allow_unicode=True) + "```"
     monkeypatch.setattr(author, "ask", fake_ask)
@@ -302,7 +302,7 @@ def test_full_translation_adapts_then_playtests(monkeypatch, fixed):
     odd = next(f"pages.{i}" for i, p in enumerate(data["pages"]) if p.get("odd_one_out"))
     prompts = []
 
-    async def fake_ask(prompt, system, schema=None, images=()):
+    async def fake_ask(prompt, system, schema=None, images=(), on_text=None):
         prompts.append(prompt)
         if schema is author.PLAYTEST_SCHEMA:
             assert "[EN]" in prompt  # the tester reads the translated book
@@ -336,7 +336,7 @@ def test_full_translation_asks_before_translating(monkeypatch):
     odd = next(f"pages.{i}" for i, p in enumerate(data["pages"]) if p.get("odd_one_out"))
     seen = []
 
-    async def fake_ask(prompt, system, schema=None, images=()):
+    async def fake_ask(prompt, system, schema=None, images=(), on_text=None):
         seen.append(prompt)
         if schema is author.TRANSLATION_PLAN_SCHEMA:
             assert "Teaching parts" in prompt and MARKING in prompt
@@ -361,3 +361,39 @@ def test_full_translation_asks_before_translating(monkeypatch):
     sent = seen[-2]  # the translation prompt, before the play-test
     assert "Follow every answer exactly" in sent and "-> Comparatives (big / bigger)" in sent
     assert "Keep the groups? -> no answer: you decide" in sent
+
+
+def test_translation_progress_follows_the_answer_as_it_is_written(monkeypatch):
+    """While Claude writes the translation, the progress shows the page it is on, the pages done, the last line
+    translated and the step; the bar only goes forward."""
+    import json as _json
+    from bookforge import translate
+    data = structured_book(False)
+    ctx = translate.context(data)
+    texts = translate.texts(data)
+    answer = _json.dumps({"items": [{"id": k, "text": f"[EN] {v}"} for k, v in texts.items()],
+                          "adapted": [{"where": "learning", "change": "x"}]}, ensure_ascii=False)
+    p = translate.Progress(data, texts, "English", full=bool(ctx))
+    seen = []
+
+    async def fake_ask(prompt, system, schema=None, images=(), on_text=None):
+        if schema is author.PLAYTEST_SCHEMA:
+            seen.append(p.view())
+            return {"problems": []}
+        for n in range(0, len(answer), 37):   # the answer arrives in pieces
+            on_text(answer[:n])
+            seen.append(p.view())
+        on_text(answer)
+        return _json.loads(answer)
+    monkeypatch.setattr(author, "ask", fake_ask)
+    asyncio.run(author.translate_full(texts, "English", "French", lambda o, t: [], ctx,
+                                      lambda t: translate.teaching_view(data, t, ctx), progress=p))
+    pcts = [v["percent"] for v in seen]
+    assert pcts == sorted(pcts) and pcts[0] < 10 < pcts[-1]
+    mid = seen[len(seen) // 2]
+    assert mid["note"].startswith("Translating ") and 0 < mid["items_done"] < len(texts)
+    assert [u["state"] for u in mid["units"]].count("now") == 1 and mid["last"].startswith("[EN]")
+    assert seen[-1]["step"] == "playtest" and seen[-1]["steps"][1]["state"] == "now"
+    assert seen[-1]["items_done"] == len(texts) and all(u["state"] == "done" for u in seen[-1]["units"])
+    p.done("new-book", {"reused": []})
+    assert p.view()["percent"] == 100 and p.view()["result"]["slug"] == "new-book"

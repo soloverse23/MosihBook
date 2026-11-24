@@ -412,22 +412,62 @@ async def translate_plan(slug: str, body: dict = Body(...)):
                                      for k, v in plan.items()}}
 
 
+# the translations running or lately finished, per (account, book): what the progress window polls
+_TRANSLATIONS: dict[tuple, object] = {}
+
+
+def _tr_key(slug: str) -> tuple:
+    return settings.current_user.get(), slug
+
+
+@app.get("/api/books/{slug}/translate/progress")
+def translate_progress(slug: str):
+    """How far the translation of this book has got: its steps, the page Claude is on, the last line it
+    translated and, once done, the new book."""
+    p = _TRANSLATIONS.get(_tr_key(slug))
+    if not p:
+        raise HTTPException(404, "no translation of this book is running")
+    return p.view()
+
+
 @app.post("/api/books/{slug}/translate")
 async def translate_book(slug: str, body: dict = Body(...)):
     """A full translation of this finished book, reusing its illustrations. `answers` are the author's answers
-    to the plan's questions ([{where, question, answer}]); Claude follows them."""
+    to the plan's questions ([{where, question, answer}]); Claude follows them.
+    While it runs, GET .../translate/progress shows how far it got."""
+    from .. import translate
+    d, data, language = _translation_source(slug, body)
+    key = _tr_key(slug)
+    running = _TRANSLATIONS.get(key)
+    if running and running.step not in ("done", "failed"):
+        raise HTTPException(409, f"this book is already being translated into {running.language}")
+    words = translate.texts(data, translate.finds(d / "build"))
+    ctx = translate.context(data)
+    progress = _TRANSLATIONS[key] = translate.Progress(data, words, language, full=bool(ctx))
+    try:
+        out = await _translate(slug, d, data, language, body, words, ctx, progress)
+    except HTTPException as e:
+        progress.failed(str(e.detail))
+        raise
+    except Exception as e:
+        progress.failed(f"The translation stopped: {e}")
+        raise
+    progress.done(out["slug"], {k: out[k] for k in ("reused", "redraw", "adaptation", "redraw_cost_usd")}
+                  | {"title": out["title"]})
+    return out
+
+
+async def _translate(slug, d, data, language, body, words, ctx, progress) -> dict:
     from .. import translate
     from ..words import canonical
-    d, data, language = _translation_source(slug, body)
     decisions = [{"where": a.get("where") or "", "question": str(a.get("question") or ""),
                   "answer": str(a.get("answer") or "")} for a in body.get("answers") or [] if a.get("question")]
-    words = translate.texts(data, translate.finds(d / "build"))
     # a full translation: games and lessons are adapted and play-tested in the new language (translate.py)
-    ctx = translate.context(data)
     full = await _claude(author.translate_full(
         words, language, canonical(data.get("language")) or "English",
         lambda o, t: translate.check(o, t) + translate.fits(data, t), ctx,
-        lambda t: translate.teaching_view(data, t, ctx), decisions))
+        lambda t: translate.teaching_view(data, t, ctx), decisions, progress=progress))
+    progress("make")
     translated = full["texts"]
     adaptation = {k: [{"where": translate.label(data, x["where"]), "text": x.get("change") or x.get("problem")}
                       for x in full[src]] for k, src in (("changes", "adapted"), ("warnings", "unresolved"))}
@@ -441,7 +481,7 @@ async def translate_book(slug: str, body: dict = Body(...)):
     brief = {**(st.get("brief") or {}), "language": language, "title": translated.get("title", data.get("title"))}
     state.save_state(new_slug, step="art", brief=brief, translated_from=root, adaptation=adaptation,
                      **{k: st[k] for k in ("outline",) if k in st})
-    return {"slug": new_slug, **result, "adaptation": adaptation,
+    return {"slug": new_slug, **result, "adaptation": adaptation, "title": brief["title"],
             "redraw_cost_usd": round(sum(spec.Book.model_validate(data).images.cost(s) for s in result["redraw"]), 2)}
 
 

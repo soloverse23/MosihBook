@@ -300,7 +300,7 @@ def test_translate_keeps_the_art(client, monkeypatch, lettered):
     shutil.copy(build / "review-mock.json", build / "review.json")
     shutil.copytree(build / "characters-mock", build.parent / "characters")
 
-    async def fake(texts, language, source, check):
+    async def fake(texts, language, source, check, progress=None):
         out = {k: f"[FR] {v}" if "[[" not in v else v for k, v in texts.items()}
         assert not check(texts, out)
         return out
@@ -313,6 +313,12 @@ def test_translate_keeps_the_art(client, monkeypatch, lettered):
         {"language": "French", "questions": [], "auto": []}
     assert client.post(f"/api/books/{slug}/translate/plan", json={"language": "English"}).status_code == 400
     r = client.post(f"/api/books/{slug}/translate", json={"language": "French"}).json()
+    # the progress window ends on the new book: every step done, a button to open it
+    prog = client.get(f"/api/books/{slug}/translate/progress").json()
+    assert prog["step"] == "done" and prog["percent"] == 100 and prog["result"]["slug"] == r["slug"]
+    assert [s["id"] for s in prog["steps"]] == ["translate", "make", "done"]  # nothing to play-test in this book
+    assert all(s["state"] == "done" for s in prog["steps"]) and all(u["state"] == "done" for u in prog["units"])
+    assert prog["result"]["title"].startswith("[FR]")
     new = Path(settings.load().books_dir) / r["slug"]
     book = yaml.safe_load((new / "book.yaml").read_text())
     assert book["language"] == "French" and book["title"].startswith("[FR]")

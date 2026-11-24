@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
+import time
 from pathlib import Path
 
 import yaml
@@ -224,3 +226,157 @@ def make(src: Path, dst: Path, data: dict, translated: dict[str, str], language:
     spec.Book.model_validate(new)
     (dst / "book.yaml").write_text(yaml.safe_dump(new, sort_keys=False, allow_unicode=True, width=100))
     return {"reused": reuse, "redraw": redraw}
+
+
+# ---- progress ---------------------------------------------------------------------------------------------
+# While Claude writes the translation, its answer is read as it grows: each item it finishes marks a part of
+# the book done, so the author sees which page it is on, how far it got and the last line it translated.
+
+_FIELD = re.compile(r'"(id|text|adapted)"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|\[)')
+
+
+def _unit(key: str) -> str:
+    """The part of the book an item belongs to: pages.3.text -> pages.3."""
+    parts = key.split(".")
+    if parts[0] == "pages" and len(parts) > 1:
+        return f"pages.{parts[1]}"
+    if parts[0] in ("learning", "finds"):
+        return parts[0]
+    return "back" if parts[0] in ("back_cover", "about_author") else "front"
+
+
+def _unit_label(data: dict, unit: str) -> str:
+    return {"front": "Title and first pages", "back": "Back cover", "learning": "The lesson",
+            "finds": "Things to find"}.get(unit) or label(data, unit)
+
+
+class Progress:
+    """How far a full translation has got. Called as `progress(event, **info)` by author.translate_full;
+    `view()` is what the browser polls."""
+
+    # the share of the bar each pass and play-test fills: (translate from, to), play-test to
+    FULL = [((4, 66), 80), ((80, 89), 93), ((93, 96), 97)]
+    PLAIN = [((4, 90), 90), ((90, 96), 96)]
+
+    def __init__(self, data: dict, texts: dict[str, str], language: str, full: bool):
+        self.language, self.full = language, full
+        self.ids = list(texts)
+        self.unit_of = {k: _unit(k) for k in texts}
+        self.units = list(dict.fromkeys(self.unit_of.values()))
+        self.labels = {u: _unit_label(data, u) for u in self.units}
+        self.started = time.time()
+        self.step = "translate"        # translate | playtest | make | done | failed
+        self.attempt = 0
+        self.passed: set[str] = set()   # items finished in the first pass (the parts already translated)
+        self.finished: set[str] = set()  # items finished in this pass
+        self.current = ""               # the item being written now
+        self.last = ""                  # the last line translated
+        self.note = ""
+        self.adapting = False
+        self.problems = 0
+        self.percent, self.cap = 2, 4
+        self._seen = 0
+        self.error = ""
+        self.result: dict | None = None
+        self.ended = 0.0
+        self.event("translate", attempt=0)
+
+    def _range(self, attempt: int):
+        plan_ = self.FULL if self.full else self.PLAIN
+        return plan_[min(attempt, len(plan_) - 1)]
+
+    def _bump(self, value: float, cap: float) -> None:
+        self.percent = max(self.percent, int(value))
+        self.cap = max(self.percent, int(cap))
+
+    def __call__(self, event: str, **info) -> None:
+        self.event(event, **info)
+
+    def event(self, event: str, attempt: int = 0, text: str = "", problems: int = 0) -> None:
+        (lo, hi), play = self._range(attempt)
+        if event == "translate":
+            self.step, self.attempt, self.adapting = "translate", attempt, False
+            self.finished, self.current, self._seen = set(), "", 0
+            if attempt == 0:
+                self.note = f"Translating into {self.language}"
+            self._bump(lo, lo + (hi - lo) * 0.05)
+        elif event == "text":
+            self._read(text)
+            share = len(self.finished) / max(1, len(self.ids))
+            self._bump(lo + (hi - lo) * share, lo + (hi - lo) * min(1.0, share + 1.5 / max(1, len(self.ids))))
+            if self.adapting:
+                self.note = "Writing down what was adapted for the new language"
+            elif self.current:
+                verb = "Translating" if attempt == 0 else "Going over"
+                self.note = f"{verb} {self.labels[self.unit_of[self.current]]}"
+        elif event == "redo":
+            self.problems = problems
+            self.note = (f"{problems} item{'s' if problems != 1 else ''} came back incomplete: "
+                         f"translating again (pass {attempt + 2})")
+        elif event == "playtest":
+            self.step = "playtest"
+            self.note = f"A {self.language}-speaking teacher is playing every game and reading every lesson"
+            self._bump(hi, play)
+        elif event == "fix":
+            self.problems = problems
+            self.note = (f"The play-test found {problems} problem{'s' if problems != 1 else ''}: "
+                         f"fixing {'them' if problems != 1 else 'it'} (pass {attempt + 2})")
+        elif event == "make":
+            self.step, self.note = "make", "Copying the pictures and setting up the new book"
+            self._bump(97, 99)
+
+    def _read(self, text: str) -> None:
+        """Take in the answer so far: only the part after the last field already read."""
+        for m in _FIELD.finditer(text, self._seen):
+            if m.end() >= len(text):    # a field still being written: read it again with more text
+                break
+            field, value = m.group(1), m.group(2)
+            if field == "adapted":
+                self.adapting = True
+            elif field == "id" and value in self.unit_of:
+                self.current = value
+            elif field == "text" and self.current:
+                self.finished.add(self.current)
+                if self.attempt == 0:
+                    self.passed.add(self.current)
+                try:
+                    self.last = json.loads(f'"{value}"')
+                except ValueError:
+                    self.last = value
+            self._seen = m.end()
+        # an item whose text is still being written is the one Claude is on
+        if self.current in self.finished and not self.adapting:
+            nxt = next((k for k in self.ids[self.ids.index(self.current) + 1:] if k not in self.finished), None)
+            self.current = nxt or self.current
+
+    def done(self, slug: str, result: dict) -> None:
+        self.step, self.result, self.note, self.ended = "done", {"slug": slug, **result}, "", time.time()
+        self.percent = self.cap = 100
+
+    def failed(self, message: str) -> None:
+        self.stopped = self.step if self.step != "done" else "make"
+        self.step, self.error, self.ended = "failed", message, time.time()
+
+    def view(self) -> dict:
+        done_units = {self.unit_of[k] for k in self.passed}
+        open_units = {self.unit_of[k] for k in self.ids if k not in self.passed}
+        current = self.unit_of.get(self.current) if self.step == "translate" and not self.adapting else None
+        units = [{"label": self.labels[u], "short": str(int(u.split(".")[1]) + 1) if u.startswith("pages.")
+                  else {"front": "T", "learning": "L", "finds": "F", "back": "B"}[u],
+                  "state": "now" if u == current else "done" if u in done_units and u not in open_units else "todo"}
+                 for u in self.units]
+        if self.step not in ("translate", "failed"):
+            units = [{**u, "state": "done"} for u in units]
+        order = ["translate", "playtest", "make", "done"] if self.full else ["translate", "make", "done"]
+        at = order.index(self.stopped if self.step == "failed" else self.step)
+        names = {"translate": "Translate every page", "playtest": f"Play every game in {self.language}",
+                 "make": "Make the new book", "done": "Ready"}
+        now = "failed" if self.step == "failed" else "now"
+        steps = [{"id": s, "label": names[s],
+                  "state": "done" if i < at or self.step == "done" else now if i == at else "todo"}
+                 for i, s in enumerate(order)]
+        return {"language": self.language, "step": self.step, "steps": steps, "percent": self.percent,
+                "cap": self.cap, "note": self.note, "units": units,
+                "items_done": len(self.passed if self.attempt else self.finished), "items": len(self.ids),
+                "pass": self.attempt + 1, "last": self.last[-240:], "elapsed": round((self.ended or time.time()) - self.started),
+                "error": self.error, "result": self.result}

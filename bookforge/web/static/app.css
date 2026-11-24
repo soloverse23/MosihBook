@@ -1005,3 +1005,45 @@ mark.hl { background: #F3E8FF; color: #7A3DB8; font-weight: 600; padding: 0 2px;
 .trq-auto { border-top: 1px solid var(--line); padding-top: var(--s3); }
 .trq-auto summary { cursor: pointer; font-weight: 550; color: var(--ink-2); }
 .trq-auto ul { margin: var(--s2) 0 0; padding-left: 18px; display: grid; gap: 4px; }
+
+/* full translation: live progress window, and the pill it hides to */
+.tr-win { width: min(560px, 100%); }
+.tr-h { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.tr-h svg { color: var(--accent); width: 18px; height: 18px; }
+.tr-win.is-done .tr-h svg { color: var(--ok); } .tr-win.is-failed .tr-h svg { color: var(--err); }
+.tr-meter { display: flex; align-items: center; gap: var(--s3); }
+.tr-meter b { font-size: 28px; line-height: 36px; font-weight: 650; letter-spacing: -.02em; min-width: 72px; }
+.tr-meter .progress { flex: 1; height: 10px; border-radius: 99px; overflow: hidden; }
+.tr-meter .progress > i { border-radius: 99px; transition: width .9s linear; }
+.tr-now { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); border-radius: var(--r);
+  background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.tr-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.tr-steps li { display: flex; align-items: center; gap: var(--s2); color: var(--ink-3); }
+.tr-steps li.now { color: var(--ink); font-weight: 550; } .tr-steps li.done { color: var(--ink-2); }
+.tr-steps li.failed { color: var(--err); font-weight: 550; }
+.tr-dot { width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: 50%;
+  border: 1.5px solid var(--line-strong); color: var(--accent); }
+.tr-dot svg { width: 12px; height: 12px; stroke-width: 2.5; } .tr-dot .spin { width: 12px; height: 12px; }
+.tr-steps li.done .tr-dot { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tr-steps li.now .tr-dot { border-color: var(--accent); }
+.tr-steps li.failed .tr-dot { background: var(--err); border-color: var(--err); color: #fff; }
+.tr-map { display: flex; flex-wrap: wrap; gap: 4px; }
+.tr-map span { min-width: 26px; height: 22px; padding: 0 4px; display: grid; place-items: center; border-radius: 5px;
+  font: 500 11px/1 var(--sans); font-variant-numeric: tabular-nums; background: var(--sunk-2); color: var(--ink-3);
+  transition: background .3s, color .3s; }
+.tr-map span.done { background: var(--accent); color: #fff; }
+.tr-map span.now { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent);
+  animation: tr-pulse 1.2s ease-in-out infinite; }
+@keyframes tr-pulse { 50% { box-shadow: inset 0 0 0 1.5px var(--accent-line); } }
+.tr-last { display: grid; gap: 4px; padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r); background: var(--sunk); }
+.tr-last p { color: var(--ink); font-style: italic; max-height: 4.8em; overflow: hidden; white-space: pre-line; }
+.tr-sum { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s2); }
+.tr-sum li { display: flex; gap: var(--s2); align-items: flex-start; } .tr-sum svg { margin-top: 2px; color: var(--ink-2); }
+.tr-win .mf { align-items: center; } .tr-hint { margin-right: auto; }
+.tr-pill { position: fixed; right: var(--s5); bottom: var(--s5); z-index: 35; display: flex; align-items: center; gap: var(--s2);
+  max-width: min(420px, calc(100vw - 40px)); padding: var(--s2) var(--s4); border-radius: 99px; border: 1px solid var(--accent-line);
+  background: var(--bg); box-shadow: var(--shadow-pop); color: var(--accent); font: inherit; cursor: pointer; }
+.tr-pill .tr-pill-note { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-pill.done { border-color: var(--ok); color: var(--ok); } .tr-pill.failed { border-color: var(--err); color: var(--err); }
+@media (prefers-reduced-motion: reduce) { .tr-map span.now { animation: none; } .tr-meter .progress > i { transition: none; } }
+.tr-back.still, .tr-back.still .modal { animation: none; }
