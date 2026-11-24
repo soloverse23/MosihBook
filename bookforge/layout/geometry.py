@@ -35,3 +35,6 @@ def fit_box(area: Box, aspect: float, anchor: str = "top") -> Box:
     bx = x + (w - bw) / 2
     by = y + h - bh if anchor == "top" else y + (h - bh) / 2
     return bx, by, bw, bh
+
+
+LESSON_BANNER = 0.40  # share of a learning page's height taken by its painted banner (the words sit below it)

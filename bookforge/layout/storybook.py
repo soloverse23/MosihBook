@@ -10,12 +10,12 @@ from xml.sax.saxutils import escape
 
 from .. import kdp
 from ..project import Project
-from ..plan import needs_text_frame, own_border, split_chapter, text_space
+from ..plan import has_lesson_art, needs_text_frame, split_chapter, text_space
 from ..spec import TYPESET_KINDS, Page
 from . import front_matter as fm
 from . import activities, shaped, tables
-from .base import FOLIO_SPACE, Sheet, frame_box, frame_panel, marked, para_html, text_band
-from .geometry import ILLUSTRATED_ART_FRACTIONS, STORY_SPOT_ASPECT
+from .base import FOLIO_SPACE, Sheet, fade as _fade, frame_box, frame_panel, marked, para_html, text_band
+from .geometry import ILLUSTRATED_ART_FRACTIONS, LESSON_BANNER, STORY_SPOT_ASPECT
 
 
 class SpotArt(Flowable):
@@ -158,17 +158,6 @@ def _fits(sheet: Sheet, interior: kdp.Interior, html: str, w: float, h: float) -
         return False
 
 
-def _fade(sheet: Sheet, y: float, h: float) -> None:
-    """Paper-colored gradient over the bottom `h` inches of art that ends at `y`."""
-    c, paper, steps = sheet.c, HexColor(sheet.theme.paper), 40
-    c.saveState()
-    for k in range(steps):
-        c.setFillColor(Color(paper.red, paper.green, paper.blue, alpha=(k + 1) / steps))
-        c.rect(0, (y + h * (steps - k - 1) / steps) * inch, sheet.page_size[0] * inch, h / steps * inch + 0.5,
-               stroke=0, fill=1)
-    c.restoreState()
-
-
 def illustrated_page(sheet: Sheet, interior: kdp.Interior, p: Page, src) -> None:
     """Picture and words on one page: full-bleed art with the text on a panel in the calm band
     the prompt kept clear. Text too long for the panel gets the art on top fading into the paper."""
@@ -189,6 +178,60 @@ def illustrated_page(sheet: Sheet, interior: kdp.Interior, p: Page, src) -> None
     _fade(sheet, interior.page_h - art_h, min(1.2, art_h * 0.25))
     sheet.text(html, (x, y, w, text_h), ILLUSTRATED_SIZE, valign="top", safe=safe,
                min_size=ILLUSTRATED_MIN, **PANEL_STYLE)
+
+
+LESSON_WIDTH = 5.4   # inches: the measure of a lesson's words, centred under the banner
+
+
+def lesson_page(sheet: Sheet, interior: kdp.Interior, book, p: Page, art) -> bool:
+    """A learning page as a designed page, not a box: the painted banner bleeds off the top and fades into
+    the paper, the title and its ornament sit under it, and the lesson is set open (tables with hairlines,
+    rules with an accent label) in a calm column. Measured on a scratch canvas first; False if it does not
+    fit even at the smallest scale (the page is then poured like any other)."""
+    t = sheet.theme
+    pw, ph = interior.page_w, interior.page_h
+    x, y, w, h = safe = interior.safe_box(sheet.page_no)
+    have_art = art is not None
+    art_h = ph * LESSON_BANNER if have_art else 0
+    fade = art_h * 0.34
+    top = min(y + h, ph - art_h + fade * 0.4) if have_art else y + h - HEAD_SPACE
+    bottom = y + FOLIO_SPACE
+    cw = min(w, LESSON_WIDTH)
+    cx = x + (w - cw) / 2
+    kicker, title = split_chapter(p.chapter) if p.chapter else ("", "")
+    label = sheet.style(9, align=TA_CENTER, color=t.accent)
+    label.spaceAfter = 6
+    heading = sheet.style(26, font=t.heading, align=TA_CENTER, leading=1.12)
+    heading.spaceAfter = 2
+
+    def build(scale: float) -> list:
+        head = []
+        if title:
+            head += ([Paragraph(spaced_caps(kicker), label)] if kicker else []) + \
+                [Paragraph(escape(title), heading), Ornament(t.accent)]
+        return head + tables.learning_page(sheet, p.text, scale, open_style=True)
+
+    for scale in BACK_SCALES:
+        flow = build(scale)
+        total = sum(f.wrap(cw * inch, 1e6)[1] + f.getSpaceAfter() for f in flow)
+        if total > (top - bottom) * inch:
+            continue
+        probe = Sheet(sheet.path, sheet.page_size, sheet.prepared_dir, t)
+        probe.mark_color = sheet.mark_color
+        trial = build(scale)
+        Frame(cx * inch, bottom * inch, cw * inch, (top - bottom) * inch, 0, 0, 0, 0).addFromList(trial, probe.c)
+        if trial:
+            continue
+        gap = (top - bottom) * inch - total  # a short lesson sits a touch above the middle of its room
+        flow = [Spacer(1, gap * 0.35)] + build(scale)
+        sheet.paper()
+        if have_art:
+            sheet.image(art, (0, ph - art_h, pw, art_h), melt=True)
+        Frame(cx * inch, bottom * inch, cw * inch, (top - bottom) * inch, 0, 0, 0, 0).addFromList(flow, sheet.c)
+        sheet.records["text"].append({"page": sheet.page_no, "box": [round(v, 4) for v in (cx, bottom, cw, top - bottom)],
+                                      "safe": [round(v, 4) for v in safe]})
+        return True
+    return False
 
 
 def _finds(project: Project) -> dict[str, list[str]]:
@@ -433,6 +476,17 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 sheet.folio(interior, on_art=True)
             sheet.new_page()
             continue
+        if has_lesson_art(book, p):  # a designed lesson page: painted banner, the lesson set open under it
+            end_page()
+            if p.chapter:
+                state["chapter"] = split_chapter(p.chapter)[1]
+            sheet.mark(n)
+            if lesson_page(sheet, interior, book, p, src if src.exists() else None):
+                if book.page_numbers:
+                    sheet.folio(interior)
+                sheet.new_page()
+                continue
+            p = p.model_copy(update={"prompt": None})  # too long for one page: poured on the plain page
         if p.kind in LEARNING_KINDS and p.prompt and src.exists() and \
                 back_page(p, frame_art, picture=src):  # a lesson and its picture, measured as one page
             continue
@@ -448,8 +502,7 @@ def render(sheet: Sheet, interior: kdp.Interior, project: Project) -> None:
                 sheet.folio(interior, on_art=True)
             sheet.new_page()
             continue
-        if p.kind in BACK_KINDS and not p.prompt and back_page(p, src if own_border(book, p) and src.exists()
-                                                             else frame_art):
+        if p.kind in BACK_KINDS and not p.prompt and back_page(p, frame_art):
             continue
         if p.chapter:
             end_page()

@@ -415,33 +415,38 @@ Add -ies: after a consonant + y, change y to i and add -es: fly → flies.
 Watch out: a name or a thing counts as he, she or it: Zigooli jumps, the hat flies."""
 
 
-@pytest.mark.parametrize("lettered,illustration", [(True, "spot"), (False, "spot"), (True, "opener")])
-def test_lesson_with_a_picture_and_a_table_is_laid_out_as_one_readable_page(tmp_path, lettered, illustration):
-    """A reference page with a table and its own picture was poured at the smallest scale: a 5pt table
-    stretched across the page under a white picture box. Now the picture shrinks before the words, the
-    table keeps its own measure and no text goes below a readable size; the page is never lettered."""
+@pytest.mark.parametrize("lettered", [True, False])
+@pytest.mark.parametrize("prompt", ["a laughing cloud", None])
+def test_lesson_page_is_a_designed_page_with_a_painted_banner(tmp_path, lettered, prompt):
+    """A lesson with a table is not a box on a picture: a banner painted for it (from the writer's idea, or
+    from the page's own words) bleeds off the top, the title and the open table sit under it, no text goes
+    below a readable size, and the page is never lettered."""
     import pypdfium2 as pdfium
     from bookforge.layout import tables
+    from bookforge.layout.geometry import LESSON_BANNER
     raw = structured_book(lettered)
     i = next(k for k, pg in enumerate(raw["pages"]) if pg["kind"] == "reference")
-    raw["pages"][i].update(text=VERB_TABLE, prompt="a laughing cloud", illustration=illustration)
+    raw["pages"][i].update(text=VERB_TABLE, prompt=prompt, illustration="spot", chapter="Discover the verbs")
     (tmp_path / "book.yaml").write_text(yaml.safe_dump(raw, allow_unicode=True))
     p = Project(tmp_path / "book.yaml", mock=True)
     assert not p.book.lettered(p.book.pages[i])
+    n = i + 1
+    slot = next(s for s in plan(p.book) if s.id == f"p{n:03d}")
+    assert slot.kind == "lesson" and slot.aspect > 2  # a wide banner, not a full page or a frame
+    if prompt is None:  # drawn from the table's own words
+        assert "love" in slot.prompt and "fly" in slot.prompt
     generate.run(p)
     m = build_interior(p)
     assert m["pages"] == 40
-    n = i + 1
     text = pdfium.PdfDocument(str(p.build / "interior.pdf"))[n - 1].get_textpage().get_text_range()
-    assert "searches" in text and "|" not in text
-    # the picture is on that page, inside the page and clear of every block of words
-    pics = [r["box"] for r in m["images"] if r["page"] == n and r["src"] == f"p{n:03d}.png"]
-    assert pics
-    if illustration == "spot":
-        x, y, w, h = pics[0]
-        words = [t["box"] for t in m["text"] if t["page"] == n and t["box"][3] != round(h, 4)]
-        assert all(b[1] + b[3] <= y + 1e-3 or b[1] >= y + h - 1e-3 for b in words)
+    assert "searches" in text and "|" not in text and "Discover the verbs" in text
+    # the banner bleeds off the top, and every block of words sits under it
+    x, y, w, h = next(r["box"] for r in m["images"] if r["page"] == n and r["src"] == f"p{n:03d}.png")
+    assert abs(y + h - p.book.trim_size[1] - 0.125) < 0.3 and abs(h - (p.book.trim_size[1] + 0.25) * LESSON_BANNER) < 0.3
+    words = [t["box"] for t in m["text"] if t["page"] == n and not t.get("folio")]
+    assert words and all(b[1] + b[3] <= y + h - 0.1 * h for b in words)
     from bookforge.layout.base import Sheet, theme_for
     sheet = Sheet(tmp_path / "x.pdf", (8.5, 8.5), tmp_path, theme_for(p.book))
-    table = next(f for f in tables.learning_page(sheet, VERB_TABLE, 0.72) if isinstance(f, tables.TableBlock))
-    assert table.size0 >= table.MIN_SIZE and table.max_w < 4  # two short columns stay a compact table
+    table = next(f for f in tables.learning_page(sheet, VERB_TABLE, 0.72, open_style=True)
+                 if isinstance(f, tables.TableBlock))
+    assert table.size0 >= table.MIN_SIZE and table.max_w < 5  # a pair of short columns stays a compact table

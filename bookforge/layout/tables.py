@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 from reportlab.lib.colors import Color, HexColor
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.units import inch
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import Flowable, Paragraph, Table, TableStyle
@@ -42,11 +42,16 @@ class TableBlock(Flowable):
     PAD = 5          # points of cell padding left and right, at scale 1
     AIR = 1.3        # a table is set this much wider than its one-line cells, never across the whole page
 
-    def __init__(self, sheet: Sheet, rows: list[list[str]], scale: float = 1.0):
+    ARROW = "→"
+
+    def __init__(self, sheet: Sheet, rows: list[list[str]], scale: float = 1.0, open_style: bool = False):
         super().__init__()
-        self.sheet, self.scale = sheet, scale
+        self.sheet, self.scale, self.open = sheet, scale, open_style
         n = max(len(r) for r in rows)
         self.rows = [r + [""] * (n - len(r)) for r in rows]
+        if open_style and n == 2:  # a pair reads as "love → loves": an arrow column between the two
+            self.rows = [[r[0], "" if i == 0 else self.ARROW, r[1]] for i, r in enumerate(self.rows)]
+            n = 3
         self.n = n
         self.size0 = max(self.SIZE * scale, self.MIN_SIZE)  # a smaller page scale never goes below MIN_SIZE
         self.min_size = self.MIN_SIZE
@@ -99,7 +104,50 @@ class TableBlock(Flowable):
             widths = [w + extra / self.n for w in widths]
         return size, widths
 
+    def _open_table(self, aw: float) -> Table:
+        """No box, no fills: a header in small accent capitals over a rule, rows on hairlines, the word and
+        its form set in the accent and the ink, a pair joined by an arrow."""
+        t, s = self.sheet.theme, self.scale
+        color = self.sheet.mark_color
+        size, widths = self._layout(aw)
+        pair = self.n == 3 and all(r[1] in ("", self.ARROW) for r in self.rows)
+        head = self.sheet.style(size * 0.86, font=t.heading, align=TA_CENTER, color=t.accent, leading=1.2,
+                                splitLongWords=0)
+        head_r = self.sheet.style(size * 0.86, font=t.heading, align=TA_RIGHT, color=t.accent, leading=1.2,
+                                  splitLongWords=0)
+        head_l = self.sheet.style(size * 0.86, font=t.heading, align=TA_LEFT, color=t.accent, leading=1.2,
+                                  splitLongWords=0)
+        lead = self.sheet.style(size * 1.08, font=t.heading, align=TA_RIGHT if pair else TA_LEFT,
+                                color=t.accent, leading=1.25, splitLongWords=0)
+        cell = self.sheet.style(size * 1.08, align=TA_LEFT if pair else TA_CENTER, leading=1.25, splitLongWords=0)
+        arrow = self.sheet.style(size * 1.1, align=TA_CENTER, color=t.accent, leading=1.25)
+        for st in (head, head_r, head_l, lead, cell, arrow):
+            st.spaceAfter = 0
+        data = []
+        for i, r in enumerate(self.rows):
+            if i == 0:
+                data.append([Paragraph(marked(c.upper() if len(c) < 40 else c, color),
+                                       head_r if pair and j == 0 else head_l if pair and j == 2 else head)
+                             for j, c in enumerate(r)])
+            else:
+                data.append([Paragraph(marked(c, color), arrow if pair and j == 1 else lead if j == 0 else cell)
+                             for j, c in enumerate(r)])
+        tint = HexColor(t.accent)
+        style = [
+            ("FONTNAME", (0, 0), (-1, -1), t.body),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4.5 * s), ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5 * s),
+            ("LEFTPADDING", (0, 0), (-1, -1), self.PAD * s), ("RIGHTPADDING", (0, 0), (-1, -1), self.PAD * s),
+            ("LINEBELOW", (0, 0), (-1, 0), 1.2, tint),
+            ("LINEBELOW", (0, 1), (-1, -2), 0.4, Color(tint.red, tint.green, tint.blue, alpha=0.28)),
+        ]
+        tab = Table(data, colWidths=widths, repeatRows=1)
+        tab.setStyle(TableStyle(style))
+        return tab
+
     def _table(self, aw: float) -> Table:
+        if self.open:
+            return self._open_table(aw)
         t, s = self.sheet.theme, self.scale
         color = self.sheet.mark_color
         size, widths = self._layout(aw)
@@ -148,8 +196,14 @@ class TableBlock(Flowable):
         return self._table(min(aw, self.max_w * inch)).split(aw, ah)
 
 
-def learning_page(sheet: Sheet, text: str, scale: float = 1.0) -> list:
-    """Reference text -> flowables: caption lines over tables, labels ("... :"), bullet lists, prose."""
+_RULE = re.compile(r"^([^:|]{2,26}?)\s*:\s+(\S.*)$")  # "Add -s: most verbs just add -s." -> label, sentence
+
+
+def learning_page(sheet: Sheet, text: str, scale: float = 1.0, open_style: bool = False) -> list:
+    """Reference text -> flowables: caption lines over tables, labels ("... :"), bullet lists, prose.
+
+    `open_style`: the designed lesson page: tables without a box, and "Label: sentence" lines set as quiet
+    left-aligned rules (the label in the accent) instead of centred lines."""
     from ..words import typeset
     t = sheet.theme
     color = sheet.mark_color
@@ -163,6 +217,9 @@ def learning_page(sheet: Sheet, text: str, scale: float = 1.0) -> list:
     prose.spaceAfter = 8 * scale
     item = sheet.style(max(t.size * scale, MIN_TEXT), align=TA_LEFT, leading=1.5)
     item.spaceAfter = 8 * scale
+    rule = sheet.style(max(t.size * scale, MIN_TEXT), align=TA_LEFT, leading=1.45, leftIndent=12 * scale,
+                       firstLineIndent=-12 * scale)
+    rule.spaceAfter = 7 * scale
 
     lines = [l.rstrip() for l in text.strip().splitlines()]
     out, k = [], 0
@@ -177,7 +234,7 @@ def learning_page(sheet: Sheet, text: str, scale: float = 1.0) -> list:
                 if not _SEP.match(lines[k].strip()):
                     rows.append(_cells(lines[k]))
                 k += 1
-            out.append(TableBlock(sheet, rows, scale))
+            out.append(TableBlock(sheet, rows, scale, open_style))
             continue
         if line.startswith(BULLET):
             items = []
@@ -195,6 +252,9 @@ def learning_page(sheet: Sheet, text: str, scale: float = 1.0) -> list:
             out.append(Paragraph(marked(line, color), caption))
         elif line.endswith(":") and len(line) < 60:
             out.append(Paragraph(marked(line, color), label))
+        elif open_style and (m := _RULE.match(line)) and not is_table_line(line):
+            out.append(Paragraph(f'<font name="{t.heading}" color="{t.accent}">{marked(m.group(1), color)}</font>'
+                                 f'&nbsp;&nbsp;{marked(m.group(2), color)}', rule))
         else:
             out.append(Paragraph(marked(line, color), prose))
         k += 1

@@ -42,6 +42,10 @@ COMPOSITION = {
              "around the edges only. The large center, about 76% of the width and 80% of the height, is "
              "completely empty plain warm paper with nothing in it, because text is printed there: no "
              "character, cloud, leaf or object reaches into it; anything large stays in the corners.",
+    "lesson": "Wide scenic banner for the top of a learning page, bleeding off the top, left and right edges. Rich "
+              "and painterly, with a clear focal point in the middle two thirds, at least 8% away from the side "
+              "edges. The bottom edge dissolves softly into plain warm-white paper with no hard line, no frame, "
+              "so the lesson's words can sit right under it.",
     "coloring": "A coloring-book page for children to color in: clean black outlines only, on pure white. "
                 "Large, simple, closed shapes a child can fill with crayons; whole characters, nothing cropped; "
                 "no tiny details, no hatching.",
@@ -209,20 +213,42 @@ def frame_scene(book: Book) -> str:
             "or objects from the story around the four edges, light and airy, no characters.")
 
 
-def reference_scene(book: Book, page) -> str:
-    """A learning page's own border, drawn from the examples on that page (the words are typeset in
-    the empty middle, so tables and conjugations are always spelled right)."""
+def _table_words(text: str, limit: int = 6) -> list[str]:
+    """The first column of the page's table (its header row and separator skipped): the words it teaches."""
+    words, seen_header = [], False
+    for line in text.splitlines():
+        l = line.strip()
+        if not (l.startswith("|") and l.count("|") >= 2) or set(l) <= set("|-: "):
+            continue
+        if not seen_header:
+            seen_header = True
+            continue
+        cell = l.strip("|").split("|")[0].replace("[[", "").replace("]]", "").strip()
+        if cell:
+            words.append(cell)
+    return words[:limit]
+
+
+def lesson_scene(book: Book, page) -> str:
+    """A learning page's painted banner (the words and tables are typeset under it, so they are always
+    spelled right): the writer's own picture idea, else a scene that acts out the page's examples or words."""
     world = book.cover_prompt.strip().rstrip(".")
-    examples = [l.strip().lstrip("•-*– ").strip().rstrip(".") for l in page.text.splitlines()
-                if l.strip()[:1] in ("•", "-", "*", "–") and not l.strip().startswith("|")]
-    if examples:
-        subject = "the page's own example sentences, each as a tiny lively vignette: " + "; ".join(examples[:6])
+    if page.prompt and page.prompt.strip():
+        core = page.prompt.strip().rstrip(".")
     else:
+        examples = [l.strip().lstrip("•-*– ").strip().rstrip(".") for l in page.text.splitlines()
+                    if l.strip()[:1] in ("•", "-", "*", "–") and not l.strip().startswith("|")]
+        words = _table_words(page.text)
         topic = page.chapter or (book.learning.topic if book.learning else "the lesson")
-        subject = f"small playful motifs about {topic}"
-    return (f"A decorative border for a learning page of this book ({world}), drawn from {subject}. "
-            "The vignettes sit in the corners and along the edges, light and airy; any character stays small "
-            "and at the edges, never reaching into the middle.")
+        if examples:
+            core = "a lively scene acting out these example sentences, each as a small moment: " + "; ".join(examples[:5])
+        elif words:
+            core = ("a lively scene that acts out these words from the lesson, each as a small joyful moment "
+                    "with the book's characters: " + ", ".join(words))
+        else:
+            core = f"a joyful scene about {topic}"
+    return (f"{core}. A scenic banner from the world of this book ({world}), the characters acting, "
+            "no writing anywhere.")
 
 
 def character_prompt(book: Book, c: Character) -> str:

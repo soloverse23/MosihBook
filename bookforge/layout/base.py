@@ -157,7 +157,8 @@ class Sheet:
         self.records["blank"].append(self.page_no)
 
     def image(self, src: Path, box: Box, crop: tuple[float, float] | None = None,
-              fit_size: tuple[float, float] | None = None, radius: float = 0, soft: bool = False) -> None:
+              fit_size: tuple[float, float] | None = None, radius: float = 0, soft: bool = False,
+              melt: bool = False) -> None:
         """Draw art into `box`. `fit_size`+`crop` handle a spread cut across two pages;
         `radius` clips the art to a rounded rectangle; `soft` sets a vignette into the paper (fit.soften)."""
         x, y, w, h = box
@@ -166,6 +167,9 @@ class Sheet:
         if soft:
             from ..imaging.fit import soften
             path = soften(path, self.theme.paper, self.prepared_dir)
+        if melt:  # a banner whose bottom dissolves into the paper (fit.melt_bottom)
+            from ..imaging.fit import melt_bottom
+            path = melt_bottom(path, self.theme.paper, self.prepared_dir)
         self.c.saveState()
         if radius:
             clip = self.c.beginPath()
@@ -257,6 +261,17 @@ class Sheet:
         c.drawCentredString(cx * inch, (cy - 0.045) * inch, str(self.page_no))
         self.records["text"].append({"page": self.page_no, "box": [round(v, 4) for v in (cx - r, cy - r, 2 * r, 2 * r)],
                                      "safe": [round(v, 4) for v in interior.safe_box(self.page_no)], "folio": True})
+
+def fade(sheet: Sheet, y: float, h: float) -> None:
+    """Paper-colored gradient over the bottom `h` inches of art that ends at `y`."""
+    c, paper, steps = sheet.c, HexColor(sheet.theme.paper), 40
+    c.saveState()
+    for k in range(steps):
+        c.setFillColor(Color(paper.red, paper.green, paper.blue, alpha=(k + 1) / steps))
+        c.rect(0, (y + h * (steps - k - 1) / steps) * inch, sheet.page_size[0] * inch, h / steps * inch + 0.5,
+               stroke=0, fill=1)
+    c.restoreState()
+
 
 def text_band(sheet: Sheet, interior: kdp.Interior, html: str, space: str, size: float | None = None,
               band: float = 0.34, grow_to: float | None = None, min_size: float = 9, width: float = 0.78,

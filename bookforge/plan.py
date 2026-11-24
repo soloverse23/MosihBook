@@ -72,17 +72,18 @@ def needs_text_frame(book: Book) -> bool:
         return False
     return any(p.text.strip() and (not p.prompt or p.kind in ("solutions", "copyright")) for p in book.pages
                if p.kind not in ("maze", "guided_drawing", "imagination") and not p.drawn_activity
-               and not own_border(book, p))
+               and not has_lesson_art(book, p))
 
 
-OWN_BORDER_KINDS = {"theme_intro", "reference"}
+LESSON_KINDS = {"theme_intro", "reference"}
 
 
-def own_border(book: Book, p) -> bool:
-    """A typeset learning page (lesson intro, reference) of a text_in_art storybook gets its own border, drawn
-    from its examples: the art holds the words in its empty middle, they never land on the drawing."""
-    return (book.type == "storybook" and book.images.text_in_art and p.kind in OWN_BORDER_KINDS
-            and not p.prompt)
+def has_lesson_art(book: Book, p) -> bool:
+    """A typeset learning page (lesson intro, reference) of a storybook is a designed page: a painted banner
+    at the top (the writer's own picture idea, else drawn from the page's words) and the lesson typeset
+    openly under it, so tables and conjugations are always spelled right. A page whose words the image model
+    letters into the picture is not one."""
+    return book.type == "storybook" and p.kind in LESSON_KINDS and not book.lettered(p)
 
 
 def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:
@@ -139,9 +140,10 @@ def plan(book: Book, pages_hint: int = kdp.MIN_PAGES) -> list[Slot]:
             space = text_space(p, layout) if p.text and layout in ("full_bleed", "spread") else None
             add(sid, layout, p.prompt, aspect, p.characters, p.text, space)
         elif book.type == "storybook":
-            if own_border(book, p):
-                # its own border drawn from its examples; the table is typeset in the empty middle
-                add(sid, "frame", prompting.reference_scene(book, p), page_aspect, p.characters, "")
+            if has_lesson_art(book, p):
+                # a painted banner on top; the lesson is typeset under it (layout.storybook.lesson_page)
+                add(sid, "lesson", prompting.lesson_scene(book, p), page_aspect / geometry.LESSON_BANNER,
+                    p.characters, "")
             elif p.prompt and lettered:
                 add(sid, p.illustration, p.prompt, page_aspect, p.characters, p.text, lettering=page_lettering(p, book))
             elif p.prompt:

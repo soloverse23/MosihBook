@@ -71,3 +71,25 @@ def soften(path: Path, paper: str, out_dir: Path, edge: float = 0.1) -> Path:
     im.putalpha(mask)
     im.save(out, "PNG", dpi=(kdp.MIN_DPI, kdp.MIN_DPI))
     return out
+
+
+def melt_bottom(path: Path, paper: str, out_dir: Path, share: float = 0.34) -> Path:
+    """A banner whose lower `share` dissolves smoothly into the page's paper (a baked gradient: no stripes,
+    no overlay), so the words under it sit on plain paper."""
+    from PIL import ImageFilter
+    tag = hashlib.sha256(f"{path}{path.stat().st_mtime_ns}{paper}{share}".encode()).hexdigest()[:16]
+    out = out_dir / f"{path.stem}-melt-{tag}.jpg"
+    if out.exists():
+        return out
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+    w, h = im.size
+    start = h * (1 - share)
+    ramp = Image.new("L", (1, h), 0)
+    for y in range(h):
+        t = min(1.0, max(0.0, (y - start) / (h - start)))
+        ramp.putpixel((0, y), round(255 * t * t * (3 - 2 * t)))  # smoothstep
+    mask = ramp.resize((w, h))
+    im = Image.composite(Image.new("RGB", (w, h), paper), im, mask)
+    im.save(out, "JPEG", quality=93, dpi=(kdp.MIN_DPI, kdp.MIN_DPI), subsampling=0)
+    return out
